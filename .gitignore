@@ -12,7 +12,7 @@ wheels/
 .venv/
 env/
 venv/
-.uv_cache/
+.*_cache
 .pdm.toml
 __pypackages__/
 
