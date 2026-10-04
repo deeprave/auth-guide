@@ -1,0 +1,49 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*$py.class
+*.so
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments and package-manager state
+.venv/
+env/
+venv/
+.uv_cache/
+.pdm.toml
+__pypackages__/
+
+# Test, coverage, type-checking, and linting output
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+.hypothesis/
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+.tox/
+.nox/
+
+# Editor and operating-system files
+.idea/
+.fleet/
+.vscode/
+.DS_Store
+.AppleDouble
+Thumbs.db
+
+# Local workflow and assistant state
+.todo/
+.guide*
+.claude/
+.codex/
+.cursor/
+.kiro/
+.agents/
+!.agents/skills/
+!.agents/knowledge/
