@@ -76,9 +76,30 @@ class _KeyringCall:
     operation: Callable[[], object]
     loop: asyncio.AbstractEventLoop
     completion: asyncio.Future[_CallOutcome]
-    caller_cancelled: threading.Event
-    dequeued: threading.Event
-    is_mutation: bool
+    mutation_lock: threading.Lock | None
+    mutation_cancelled: bool = False
+
+    def cancel_pending_mutation(self) -> None:
+        """Record cancellation while atomically preserving a prior worker claim."""
+        if self.mutation_lock is not None:
+            with self.mutation_lock:
+                self.mutation_cancelled = True
+
+    def claim_mutation(self) -> bool:
+        """Claim a mutation unless cancellation reached the queue boundary first."""
+        if self.mutation_lock is None:
+            return True
+        with self.mutation_lock:
+            if self.mutation_cancelled:
+                return False
+            return True
+
+    def was_cancelled_mutation(self) -> bool:
+        """Return whether the awaiting caller cancelled a mutation."""
+        if self.mutation_lock is None:
+            return False
+        with self.mutation_lock:
+            return self.mutation_cancelled
 
 
 @dataclass(slots=True)
@@ -168,13 +189,14 @@ class PlatformSecretProvider:
             raise SecretProviderClosedError("Platform secret provider is not running")
         loop = asyncio.get_running_loop()
         completion: asyncio.Future[_CallOutcome] = loop.create_future()
-        call = _KeyringCall(operation, loop, completion, threading.Event(), threading.Event(), is_mutation)
+        mutation_lock = threading.Lock() if is_mutation else None
+        call = _KeyringCall(operation, loop, completion, mutation_lock)
         self._calls.put(call)
 
         try:
             outcome = await asyncio.shield(completion)
         except asyncio.CancelledError:
-            call.caller_cancelled.set()
+            call.cancel_pending_mutation()
             raise
 
         if outcome.error is not None:
@@ -196,10 +218,9 @@ class PlatformSecretProvider:
                     stop = item
                     item = None
                     return
-                if item.is_mutation and item.caller_cancelled.is_set():
+                if not item.claim_mutation():
                     item.loop.call_soon_threadsafe(_set_result, item.completion, _CallOutcome())
                 else:
-                    item.dequeued.set()
                     self._run_call(item)
                 item = None
         finally:
@@ -211,7 +232,7 @@ class PlatformSecretProvider:
         try:
             outcome = _CallOutcome(value=call.operation())
         except BaseException as error:
-            if call.is_mutation and call.caller_cancelled.is_set():
+            if call.was_cancelled_mutation():
                 logger.warning("Cancelled platform keyring mutation failed: %s", type(error).__name__)
                 outcome = _CallOutcome()
             else:
