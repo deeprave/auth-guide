@@ -3,10 +3,23 @@ name = "auth-guide"
 version = "0.1.0"
 description = "Reference OIDC provider service and administration CLI"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "David Nugent", email = "davidn@uniquode.io" }
 ]
-requires-python = ">=3.13"
+requires-python = ">=3.11"
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+]
 dependencies = [
     "keyring>=25.7.0",
     "tortoise-sqlcipher>=0.1.0",
@@ -21,7 +34,7 @@ package = true
 
 [tool.ruff]
 src = ["src"]
-target-version = "py313"
+target-version = "py311"
 line-length = 120
 
 [tool.ruff.lint]
@@ -31,7 +44,7 @@ select = ["I", "F401"]
 known-first-party = ["auth_guide"]
 
 [tool.ty.environment]
-python-version = "3.13"
+python-version = "3.11"
 
 [tool.ty.analysis]
 respect-type-ignore-comments = true
