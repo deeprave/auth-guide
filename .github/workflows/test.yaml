@@ -1,0 +1,79 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/test.yaml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/test.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: uv sync --frozen --dev --python python
+
+      - name: Install GNOME Keyring
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends dbus gnome-keyring
+
+      - name: Run tests in a Secret Service session
+        run: |
+          dbus-run-session -- bash -euo pipefail -c '
+            export XDG_DATA_HOME="$RUNNER_TEMP/auth-guide-keyring"
+            keyring_environment="$(mktemp)"
+            trap "rm -f \"$keyring_environment\"" EXIT
+            printf "%s\\n" "auth-guide-ci-test-keyring" \
+              | gnome-keyring-daemon --unlock --components=secrets >"$keyring_environment"
+            . "$keyring_environment"
+            uv run pytest tests/ -v -Walways
+          '
+        env:
+          NO_COLOR: '1'
+          TERM: dumb
+
+      - name: Lint with Ruff
+        run: uv run ruff check
+
+      - name: Check formatting with Ruff
+        run: uv run ruff format --check src/ tests/ --exclude '*.md'
+
+      - name: Type check with ty
+        run: uv run ty check src/ tests/
+
+      - name: Security check with Bandit
+        run: uv run bandit -ll -r src/
+
+      - name: Build package
+        run: uv build

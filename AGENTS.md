@@ -25,6 +25,16 @@ spellings such as "license" and "artifact" are exceptions.
 Run every pytest invocation in a foreground terminal, including invocations
 from pre-commit or commit hooks, and wait for its complete result.
 
+## Async-First Design
+
+This is an async-first application. Define functions as async by default unless
+they are genuinely trivial or are invoked synchronously by an external callback
+that cannot call async code.
+
+Prefer an async boundary even when a function's current work is synchronous:
+code evolves, and a simple helper may later need to call async operations. Do
+not introduce synchronous wrappers merely for convenience.
+
 ## Test Quality
 
 Tests must validate observable behaviour. Do not assert the literal contents
