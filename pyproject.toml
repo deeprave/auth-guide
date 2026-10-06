@@ -7,7 +7,9 @@ authors = [
     { name = "David Nugent", email = "davidn@uniquode.io" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "tortoise-sqlcipher",
+]
 
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]
@@ -16,16 +18,8 @@ build-backend = "uv_build"
 [tool.uv]
 package = true
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
-filterwarnings = ["error"]
-addopts = [
-    "--strict-markers",
-    "--strict-config",
-    "--cov=src/auth_guide",
-    "--cov-report=term-missing",
-]
+[tool.uv.sources]
+tortoise-sqlcipher = { path = "../tortoise-sqlcipher", editable = true }
 
 [tool.ruff]
 src = ["src"]
@@ -47,21 +41,12 @@ respect-type-ignore-comments = true
 [tool.ty.terminal]
 error-on-warning = true
 
-[tool.vulture]
-exclude = ["tests/"]
-min_confidence = 60
-
 [dependency-groups]
 dev = [
-    "pytest>=8.4.2",
-    "pytest-cov>=7.0.0",
-    "coverage>=7.10.7",
     "ruff>=0.13.2",
     "ty",
     "pre-commit>=4.0.0",
     "watchdog>=6.0.0",
     "bandit>=1.9.2",
     "pyright>=1.1.407",
-    "osvcheck>=1.0.0b1",
-    "vulture>=2.14",
 ]
