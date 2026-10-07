@@ -11,9 +11,25 @@ Reference OIDC provider service and administration CLI for the future
 
 Requires Python 3.12 or later.
 
-This repository contains the Python project scaffold. The reference provider,
-account schema, and OIDC endpoints remain future changes. Persistent account
+The account schema and OIDC endpoints remain future changes. Persistent account
 data will use an encrypted database.
+
+## Local TLS authority
+
+The library provides a provider-owned local certificate authority for the
+reference service. Initialise it once before any other certificate operation;
+the CA and server private keys remain in the platform secret store, while
+public certificate lifecycle metadata is kept under
+`~/.config/mcp-guide/auth/` by default. The future administration CLI will
+provide the supported initialisation, rotation, and trust-management commands.
+
+System trust changes are explicit privileged operations. Debian-family systems
+use `update-ca-certificates`; Red Hat-family systems use `update-ca-trust` and
+the p11-kit anchor directory. The latter is supported by its platform facade,
+but native Red Hat validation remains an operator/CI responsibility until a
+Red Hat execution environment is added. macOS uses the System Keychain with an
+SSL-only trust setting. No arbitrary JDK or Amazon Corretto trust store is
+modified.
 
 ## Platform secret store
 

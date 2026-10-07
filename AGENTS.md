@@ -35,6 +35,16 @@ Prefer an async boundary even when a function's current work is synchronous:
 code evolves, and a simple helper may later need to call async operations. Do
 not introduce synchronous wrappers merely for convenience.
 
+Never use `asyncio.to_thread` unless the user explicitly directs it. Use
+native asynchronous filesystem APIs instead: `aiofiles` for file operations
+and an asynchronous path API where directory or path operations are needed.
+Do not hide blocking work inside async code or synchronous helpers. When a
+required dependency has no suitable asynchronous API, stop and establish the
+appropriate owned async boundary with the user before implementing it. An
+owned helper component with a clear lifecycle and public async interface—like
+`PlatformSecretProvider`—is the preferred pattern; do not scatter ad-hoc
+thread offloads through callers.
+
 ## Test Quality
 
 Tests must validate observable behaviour. Do not assert the literal contents

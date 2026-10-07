@@ -20,6 +20,8 @@ classifiers = [
     "Topic :: Security",
 ]
 dependencies = [
+    "anyio>=4.15.1",
+    "cryptography>=50.0.2",
     "keyring>=25.7.0",
     "tortoise-sqlcipher>=0.1.0",
 ]
