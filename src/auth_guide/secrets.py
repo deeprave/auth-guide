@@ -1,5 +1,7 @@
 """Async access to provider-owned secrets in the platform keyring."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import queue
@@ -77,6 +79,7 @@ class _KeyringCall:
     loop: asyncio.AbstractEventLoop
     completion: asyncio.Future[_CallOutcome]
     mutation_lock: threading.Lock | None
+    caller_task: asyncio.Task[object] | None
     mutation_cancelled: bool = False
 
     def cancel_pending_mutation(self) -> None:
@@ -90,7 +93,9 @@ class _KeyringCall:
         if self.mutation_lock is None:
             return True
         with self.mutation_lock:
-            if self.mutation_cancelled:
+            caller_task = self.caller_task
+            if self.mutation_cancelled or (caller_task is not None and caller_task.cancelling()):
+                self.mutation_cancelled = True
                 return False
             return True
 
@@ -190,7 +195,8 @@ class PlatformSecretProvider:
         loop = asyncio.get_running_loop()
         completion: asyncio.Future[_CallOutcome] = loop.create_future()
         mutation_lock = threading.Lock() if is_mutation else None
-        call = _KeyringCall(operation, loop, completion, mutation_lock)
+        caller_task = asyncio.current_task() if is_mutation else None
+        call = _KeyringCall(operation, loop, completion, mutation_lock, caller_task)
         self._calls.put(call)
 
         try:
@@ -218,7 +224,7 @@ class PlatformSecretProvider:
                     stop = item
                     item = None
                     return
-                if not item.claim_mutation():
+                if item.mutation_lock is not None and not self._claim_mutation(item):
                     item.loop.call_soon_threadsafe(_set_result, item.completion, _CallOutcome())
                 else:
                     self._run_call(item)
@@ -226,6 +232,20 @@ class PlatformSecretProvider:
         finally:
             if stop is not None:
                 stop.loop.call_soon_threadsafe(_complete_shutdown, stop.completion)
+
+    @staticmethod
+    def _claim_mutation(call: _KeyringCall) -> bool:
+        """Obtain a cancellation-aware mutation claim on the caller's loop."""
+        claimed = threading.Event()
+        result: list[bool] = []
+
+        def claim() -> None:
+            result.append(call.claim_mutation())
+            claimed.set()
+
+        call.loop.call_soon_threadsafe(claim)
+        claimed.wait()
+        return result[0]
 
     @staticmethod
     def _run_call(call: _KeyringCall) -> None:

@@ -14,7 +14,8 @@ one the worker has already claimed.
 - Skip a cancelled mutation that remains pending.
 - Preserve the existing best-effort behaviour for a mutation the worker has
   already dequeued.
-- Add deterministic behavioural coverage of the cancellation/dequeue boundary.
+- Retain behavioural coverage for cancelled queued mutations through the public
+  provider interface.
 
 ## Capabilities
 

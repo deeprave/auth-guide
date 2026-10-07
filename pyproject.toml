@@ -8,13 +8,12 @@ license-files = ["LICENSE"]
 authors = [
     { name = "David Nugent", email = "davidn@uniquode.io" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -34,7 +33,7 @@ package = true
 
 [tool.ruff]
 src = ["src"]
-target-version = "py311"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.lint]
@@ -44,7 +43,7 @@ select = ["I", "F401"]
 known-first-party = ["auth_guide"]
 
 [tool.ty.environment]
-python-version = "3.11"
+python-version = "3.12"
 
 [tool.ty.analysis]
 respect-type-ignore-comments = true
