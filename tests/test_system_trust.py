@@ -30,7 +30,9 @@ async def test_explicit_trust_store_selection_uses_the_requested_supported_store
     ("os_release", "expected_name"),
     [
         ({"ID": "debian"}, "debian"),
+        ({"ID": "'debian'"}, "debian"),
         ({"ID_LIKE": "debian ubuntu"}, "debian"),
+        ({"ID_LIKE": "'debian ubuntu'"}, "debian"),
         ({"ID": "fedora"}, "redhat"),
         ({"ID_LIKE": "rhel fedora"}, "redhat"),
     ],

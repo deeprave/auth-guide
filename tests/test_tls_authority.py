@@ -1,6 +1,7 @@
 """Behaviour tests for the provider-owned local certificate authority."""
 
 import asyncio
+import json
 import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -240,6 +241,24 @@ async def test_malformed_persisted_metadata_is_reported_as_a_validation_error(tm
         async with LocalCertificateAuthority(tmp_path, secrets) as authority:
             with pytest.raises(ValueError, match="Certificate metadata is invalid"):
                 await authority.get_certificate_lifecycle()
+
+
+@pytest.mark.anyio
+async def test_ca_rotation_rejects_malformed_pending_removal_metadata(tmp_path: Path) -> None:
+    """A corrupt pending-removal record cannot be overwritten by a new authority."""
+    trust_store = RecordingTrustStore()
+    metadata_path = AsyncPath(tmp_path) / "certificates.json"
+    async with PlatformSecretProvider("auth-guide-malformed-pending-removal", MemoryKeyring()) as secrets:
+        async with LocalCertificateAuthority(tmp_path, secrets) as authority:
+            await authority.initialise()
+            document = json.loads(await metadata_path.read_text(encoding="utf-8"))
+            document["pending_authority_removal"] = "invalid"
+            await metadata_path.write_text(json.dumps(document), encoding="utf-8")
+
+            with pytest.raises(ValueError, match="pending authority removal"):
+                await authority.rotate_certificate_authority(trust_store)
+
+    assert trust_store.installed_certificates == []
 
 
 @pytest.mark.anyio

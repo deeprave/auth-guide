@@ -101,7 +101,10 @@ async def select_system_trust_store(
         raise UnsupportedTrustStoreError(msg)
 
     release = os_release if os_release is not None else await _read_os_release()
-    identifiers = {release.get("ID", "").lower(), *release.get("ID_LIKE", "").lower().split()}
+    identifiers = {
+        _unquote_os_release_value(release.get("ID", "")).lower(),
+        *_unquote_os_release_value(release.get("ID_LIKE", "")).lower().split(),
+    }
     if identifiers & {"debian", "ubuntu"}:
         from auth_guide.platform_trust.debian import DebianSystemTrustStore
 
@@ -130,5 +133,13 @@ async def _read_os_release() -> Mapping[str, str]:
         if "=" not in line or line.startswith("#"):
             continue
         key, value = line.split("=", maxsplit=1)
-        fields[key] = value.strip().strip('"')
+        fields[key] = _unquote_os_release_value(value)
     return fields
+
+
+def _unquote_os_release_value(value: str) -> str:
+    """Return an os-release value without matching surrounding quotes."""
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value

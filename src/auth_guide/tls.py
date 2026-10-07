@@ -196,7 +196,9 @@ class LocalCertificateAuthority:
             raise CertificateAuthorityNotInitialisedError(msg)
 
         pending_removal = document.get("pending_authority_removal")
-        if isinstance(pending_removal, dict):
+        if pending_removal is not None:
+            if not isinstance(pending_removal, dict):
+                raise ValueError("Certificate metadata pending authority removal is invalid")
             await self._complete_pending_authority_removal(
                 metadata_path, document, cast(dict[str, object], pending_removal), trust_store
             )
