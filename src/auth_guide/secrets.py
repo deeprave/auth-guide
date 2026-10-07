@@ -1,5 +1,7 @@
 """Async access to provider-owned secrets in the platform keyring."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import queue
@@ -76,9 +78,33 @@ class _KeyringCall:
     operation: Callable[[], object]
     loop: asyncio.AbstractEventLoop
     completion: asyncio.Future[_CallOutcome]
-    caller_cancelled: threading.Event
-    dequeued: threading.Event
-    is_mutation: bool
+    mutation_lock: threading.Lock | None
+    caller_task: asyncio.Task[object] | None
+    mutation_cancelled: bool = False
+
+    def cancel_pending_mutation(self) -> None:
+        """Record cancellation while atomically preserving a prior worker claim."""
+        if self.mutation_lock is not None:
+            with self.mutation_lock:
+                self.mutation_cancelled = True
+
+    def claim_mutation(self) -> bool:
+        """Claim a mutation unless cancellation reached the queue boundary first."""
+        if self.mutation_lock is None:
+            return True
+        with self.mutation_lock:
+            caller_task = self.caller_task
+            if self.mutation_cancelled or (caller_task is not None and caller_task.cancelling()):
+                self.mutation_cancelled = True
+                return False
+            return True
+
+    def was_cancelled_mutation(self) -> bool:
+        """Return whether the awaiting caller cancelled a mutation."""
+        if self.mutation_lock is None:
+            return False
+        with self.mutation_lock:
+            return self.mutation_cancelled
 
 
 @dataclass(slots=True)
@@ -168,13 +194,15 @@ class PlatformSecretProvider:
             raise SecretProviderClosedError("Platform secret provider is not running")
         loop = asyncio.get_running_loop()
         completion: asyncio.Future[_CallOutcome] = loop.create_future()
-        call = _KeyringCall(operation, loop, completion, threading.Event(), threading.Event(), is_mutation)
+        mutation_lock = threading.Lock() if is_mutation else None
+        caller_task = asyncio.current_task() if is_mutation else None
+        call = _KeyringCall(operation, loop, completion, mutation_lock, caller_task)
         self._calls.put(call)
 
         try:
             outcome = await asyncio.shield(completion)
         except asyncio.CancelledError:
-            call.caller_cancelled.set()
+            call.cancel_pending_mutation()
             raise
 
         if outcome.error is not None:
@@ -196,10 +224,9 @@ class PlatformSecretProvider:
                     stop = item
                     item = None
                     return
-                if item.is_mutation and item.caller_cancelled.is_set():
+                if item.mutation_lock is not None and not self._claim_mutation(item):
                     item.loop.call_soon_threadsafe(_set_result, item.completion, _CallOutcome())
                 else:
-                    item.dequeued.set()
                     self._run_call(item)
                 item = None
         finally:
@@ -207,11 +234,25 @@ class PlatformSecretProvider:
                 stop.loop.call_soon_threadsafe(_complete_shutdown, stop.completion)
 
     @staticmethod
+    def _claim_mutation(call: _KeyringCall) -> bool:
+        """Obtain a cancellation-aware mutation claim on the caller's loop."""
+        claimed = threading.Event()
+        result: list[bool] = []
+
+        def claim() -> None:
+            result.append(call.claim_mutation())
+            claimed.set()
+
+        call.loop.call_soon_threadsafe(claim)
+        claimed.wait()
+        return result[0]
+
+    @staticmethod
     def _run_call(call: _KeyringCall) -> None:
         try:
             outcome = _CallOutcome(value=call.operation())
         except BaseException as error:
-            if call.is_mutation and call.caller_cancelled.is_set():
+            if call.was_cancelled_mutation():
                 logger.warning("Cancelled platform keyring mutation failed: %s", type(error).__name__)
                 outcome = _CallOutcome()
             else:

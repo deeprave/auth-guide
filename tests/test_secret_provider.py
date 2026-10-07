@@ -10,7 +10,12 @@ import keyring
 import pytest
 from keyring.errors import NoKeyringError
 
-from auth_guide.secrets import MissingSecretError, PlatformSecretProvider, SecretProviderError, SecretReference
+from auth_guide.secrets import (
+    MissingSecretError,
+    PlatformSecretProvider,
+    SecretProviderError,
+    SecretReference,
+)
 
 
 @dataclass
@@ -38,8 +43,13 @@ class BlockingKeyring(MemoryKeyring):
 
     def set_password(self, service_name: str, username: str, password: str) -> None:
         self.started.set()
-        self.release.wait(timeout=1)
+        self.release.wait()
         super().set_password(service_name, username, password)
+
+    def delete_password(self, service_name: str, username: str) -> None:
+        self.started.set()
+        self.release.wait()
+        super().delete_password(service_name, username)
 
 
 @dataclass
@@ -48,7 +58,7 @@ class FailingBlockingKeyring(BlockingKeyring):
 
     def set_password(self, service_name: str, username: str, password: str) -> None:
         self.started.set()
-        self.release.wait(timeout=1)
+        self.release.wait()
         del service_name, username, password
         raise RuntimeError("backend disclosed replacement-value")
 
@@ -122,8 +132,8 @@ def test_cancelled_mutation_completes_on_a_best_effort_basis() -> None:
 
         async with PlatformSecretProvider("auth-guide", keyring) as provider:
             mutation = asyncio.create_task(provider.store(reference, "replacement-value"))
-            assert await asyncio.to_thread(keyring.started.wait, 1)
             try:
+                assert await asyncio.to_thread(keyring.started.wait, 1)
                 mutation.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await mutation
@@ -143,16 +153,43 @@ def test_cancelled_pending_mutation_does_not_run() -> None:
 
         async with PlatformSecretProvider("auth-guide", keyring) as provider:
             first_mutation = asyncio.create_task(provider.store(first, "first-value"))
-            assert await asyncio.to_thread(keyring.started.wait, 1)
-            pending_mutation = asyncio.create_task(provider.store(pending, "pending-value"))
-            await asyncio.sleep(0)
-            pending_mutation.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await pending_mutation
-            keyring.release.set()
+            try:
+                assert await asyncio.to_thread(keyring.started.wait, 1)
+                pending_mutation = asyncio.create_task(provider.store(pending, "pending-value"))
+                await asyncio.sleep(0)
+                pending_mutation.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending_mutation
+            finally:
+                keyring.release.set()
             await first_mutation
 
         assert ("auth-guide", "pending-key") not in keyring.values
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_pending_delete_does_not_run() -> None:
+    async def exercise() -> None:
+        keyring = BlockingKeyring()
+        first = SecretReference("first-key")
+        pending = SecretReference("pending-key")
+        keyring.values[("auth-guide", pending.name)] = "pending-value"
+
+        async with PlatformSecretProvider("auth-guide", keyring) as provider:
+            first_mutation = asyncio.create_task(provider.store(first, "first-value"))
+            try:
+                assert await asyncio.to_thread(keyring.started.wait, 1)
+                pending_mutation = asyncio.create_task(provider.delete(pending))
+                await asyncio.sleep(0)
+                pending_mutation.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await pending_mutation
+            finally:
+                keyring.release.set()
+            await first_mutation
+
+        assert keyring.values[("auth-guide", "pending-key")] == "pending-value"
 
     asyncio.run(exercise())
 
@@ -202,18 +239,21 @@ def test_cancelled_closer_does_not_abandon_shared_shutdown() -> None:
         reference = SecretReference("database-key")
         await provider.start()
         mutation = asyncio.create_task(provider.store(reference, "replacement-value"))
-        assert await asyncio.to_thread(keyring.started.wait, 1)
+        try:
+            assert await asyncio.to_thread(keyring.started.wait, 1)
 
-        cancelled_closer = asyncio.create_task(provider.aclose())
-        surviving_closer = asyncio.create_task(provider.aclose())
-        await asyncio.sleep(0)
-        cancelled_closer.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await cancelled_closer
+            cancelled_closer = asyncio.create_task(provider.aclose())
+            surviving_closer = asyncio.create_task(provider.aclose())
+            await asyncio.sleep(0)
+            cancelled_closer.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled_closer
 
-        keyring.release.set()
-        await mutation
-        await surviving_closer
+            keyring.release.set()
+            await mutation
+            await surviving_closer
+        finally:
+            keyring.release.set()
         assert not provider.is_running
 
     asyncio.run(exercise())
@@ -226,8 +266,8 @@ def test_cancelled_failed_mutation_logs_no_secret(caplog: pytest.LogCaptureFixtu
 
         async with PlatformSecretProvider("auth-guide", keyring) as provider:
             mutation = asyncio.create_task(provider.store(reference, "replacement-value"))
-            assert await asyncio.to_thread(keyring.started.wait, 1)
             try:
+                assert await asyncio.to_thread(keyring.started.wait, 1)
                 mutation.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await mutation
