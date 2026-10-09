@@ -16,6 +16,7 @@ from keyring.errors import KeyringError
 __all__ = [
     "MissingSecretError",
     "PlatformSecretProvider",
+    "SecretAlreadyExistsError",
     "SecretProviderClosedError",
     "SecretProviderError",
     "SecretReference",
@@ -46,6 +47,10 @@ class SecretProviderError(RuntimeError):
 
 class MissingSecretError(SecretProviderError):
     """Raised when a configured secret reference cannot be resolved."""
+
+
+class SecretAlreadyExistsError(SecretProviderError):
+    """Raised when an explicit secret creation finds an existing reference."""
 
 
 class SecretProviderClosedError(SecretProviderError):
@@ -175,6 +180,17 @@ class PlatformSecretProvider:
             raise MissingSecretError(f"Secret reference is unavailable: {reference.name}")
         return str(value)
 
+    async def create(self, reference: SecretReference, value: str) -> None:
+        """Create a secret only when its opaque reference is currently absent."""
+
+        def operation() -> None:
+            existing = self._keyring.get_password(self._namespace, reference.name)
+            if existing is not None:
+                raise SecretAlreadyExistsError(f"Secret reference already exists: {reference.name}")
+            self._keyring.set_password(self._namespace, reference.name, value)
+
+        await self._call(operation, is_mutation=True)
+
     async def store(self, reference: SecretReference, value: str) -> None:
         """Create or replace one secret at its opaque reference."""
         await self._call(
@@ -211,7 +227,7 @@ class PlatformSecretProvider:
 
     @staticmethod
     def _raise_operation_error(error: BaseException) -> None:
-        if isinstance(error, KeyringError):
+        if isinstance(error, (KeyringError, SecretProviderError)):
             raise error
         raise SecretProviderError("Platform keyring operation failed") from error
 

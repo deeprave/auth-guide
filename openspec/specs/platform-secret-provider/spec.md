@@ -23,6 +23,10 @@ provider shutdown.
 - **WHEN** a configured reference cannot be resolved
 - **THEN** startup fails with a secret-safe error
 
+#### Scenario: Initial secret is created concurrently
+- **WHEN** callers concurrently explicitly create an absent secret
+- **THEN** exactly one creation succeeds and the other reports that the reference exists
+
 #### Scenario: Provider is shut down
 - **WHEN** the provider shutdown completes
 - **THEN** its private keyring worker has stopped and accepts no new operations
