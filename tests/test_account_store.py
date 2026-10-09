@@ -32,7 +32,7 @@ class MemoryKeyring:
 @pytest.mark.anyio
 async def test_account_record_exposes_all_metadata_and_effective_grants() -> None:
     """An account record retains ordinary profile and lifecycle state."""
-    account = AccountRecord.construct(
+    account = AccountRecord(
         id=uuid4(),
         email="member@example.com",
         email_comparison="member@example.com",
@@ -44,7 +44,7 @@ async def test_account_record_exposes_all_metadata_and_effective_grants() -> Non
     )
 
     assert account.full_name == "Ada Lovelace"
-    assert account.created_at.tzinfo == timezone.utc
+    assert account.created_at.utcoffset() == timedelta(0)
     assert account.is_active
     assert account.has_grant(Grant.ADMIN)
     assert account.has_grant(Grant.USER)
@@ -53,7 +53,7 @@ async def test_account_record_exposes_all_metadata_and_effective_grants() -> Non
 @pytest.mark.anyio
 async def test_expired_account_retains_its_record_but_has_no_effective_grant() -> None:
     """Expiry affects access only; it does not remove account metadata."""
-    account = AccountRecord.construct(
+    account = AccountRecord(
         id=uuid4(),
         email="expired@example.com",
         email_comparison="expired@example.com",

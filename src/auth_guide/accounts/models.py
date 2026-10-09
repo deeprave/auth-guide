@@ -1,8 +1,10 @@
 """Tortoise models for encrypted account persistence."""
 
+import logging
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import Any
 
 from email_validator import EmailNotValidError, validate_email
 from tortoise import fields
@@ -12,6 +14,10 @@ from tortoise.manager import Manager
 from tortoise.models import Model
 from tortoise.queryset import QuerySet
 
+from auth_guide.accounts.passwords import PasswordOperations
+
+logger = logging.getLogger(__name__)
+
 
 class Grant(StrEnum):
     """The one global grant persisted for each provider account."""
@@ -20,12 +26,37 @@ class Grant(StrEnum):
     ADMIN = "admin"
 
 
+class AccountQuerySet(QuerySet):
+    """Warn when native bulk writes bypass account-model validation."""
+
+    def update(self, **kwargs: object):
+        logger.warning("Bulk account update bypasses AccountRecord.save validation")
+        return super().update(**kwargs)
+
+    def bulk_create(
+        self,
+        objects: Iterable[Any],
+        batch_size: int | None = None,
+        ignore_conflicts: bool = False,
+        update_fields: Iterable[str] | None = None,
+        on_conflict: Iterable[str] | None = None,
+    ) -> Any:
+        logger.warning("Bulk account creation bypasses AccountRecord.save validation")
+        return super().bulk_create(objects, batch_size, ignore_conflicts, update_fields, on_conflict)
+
+    def bulk_update(self, objects: Iterable[Any], fields: Iterable[str], batch_size: int | None = None) -> Any:
+        logger.warning("Bulk account update bypasses AccountRecord.save validation")
+        return super().bulk_update(objects, fields, batch_size)
+
+
 class ActiveAccountManager(Manager):
     """Provide active accounts through the normal model query interface."""
 
     def get_queryset(self) -> QuerySet:
         """Return accounts whose optional expiry permits access now."""
-        return super().get_queryset().filter(Q(expires_at=None) | Q(expires_at__gt=datetime.now(timezone.utc)))
+        if self._model is None:
+            raise RuntimeError("Account manager has no model")
+        return AccountQuerySet(self._model).filter(Q(expires_at=None) | Q(expires_at__gt=datetime.now(timezone.utc)))
 
 
 class AccountRecord(Model):
@@ -47,7 +78,7 @@ class AccountRecord(Model):
     @classmethod
     def including_inactive(cls) -> QuerySet:
         """Return an unfiltered account query for explicit administration work."""
-        return QuerySet(cls)
+        return AccountQuerySet(cls)
 
     @property
     def is_active(self) -> bool:
@@ -79,6 +110,9 @@ class AccountRecord(Model):
                 Grant(self.grant)
             except ValueError as error:
                 raise ValueError("Account grant is invalid") from error
+        if fields_to_update is None or "password_hash" in fields_to_update:
+            if self.password_hash is not None and not PasswordOperations.is_current_verifier(self.password_hash):
+                raise ValueError("Account password verifier is invalid")
         await super().save(
             using_db=using_db,
             update_fields=fields_to_update,

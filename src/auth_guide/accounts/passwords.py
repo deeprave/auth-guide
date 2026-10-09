@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar, cast
 
-from argon2 import PasswordHasher, Type
+from argon2 import PasswordHasher, Type, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError
 
 __all__ = ["PasswordOperations", "PasswordOperationsClosedError", "PasswordOperationsError"]
@@ -114,6 +114,23 @@ class PasswordOperations:
                 return False
 
         return await self._call(operation)
+
+    @staticmethod
+    def is_current_verifier(verifier: str) -> bool:
+        """Report whether a verifier uses the provider's fixed Argon2id policy."""
+        try:
+            parameters = extract_parameters(verifier)
+        except InvalidHashError:
+            return False
+        return (
+            parameters.type is Type.ID
+            and parameters.version == 19
+            and parameters.time_cost == 3
+            and parameters.memory_cost == 64 * 1024
+            and parameters.parallelism == 4
+            and parameters.hash_len == 32
+            and parameters.salt_len == 16
+        )
 
     async def _call(self, operation: Callable[[], ResultT]) -> ResultT:
         worker = self._worker

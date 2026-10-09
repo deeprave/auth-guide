@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import secrets
 from pathlib import Path
@@ -62,8 +63,13 @@ class AccountStore:
         await self._config_dir.mkdir(parents=True, exist_ok=True)
         self._database_key = await self._resolve_database_key()
         await self._passwords.start()
-        await Tortoise.init(config=self._tortoise_config(), init_connections=False)
-        self._started = True
+        try:
+            await Tortoise.init(config=self._tortoise_config(), init_connections=False)
+            self._started = True
+        except BaseException:
+            await self._passwords.aclose()
+            self._database_key = None
+            raise
 
     async def initialise(self) -> None:
         """Explicitly create a new encrypted account database from user migrations."""
@@ -75,13 +81,14 @@ class AccountStore:
         if not await self._has_user_migrations():
             raise AccountStoreError("Account store migration is required")
         key = secrets.token_bytes(32)
-        created_database_key = False
         try:
-            await self._secrets.create(DATABASE_KEY_REFERENCE, base64.b64encode(key).decode("ascii"))
-            created_database_key = True
+            creation_cancelled = await self._create_database_key(key)
         except SecretAlreadyExistsError as error:
             raise AccountStoreError("Account database key already exists") from error
         try:
+            created_database_key = True
+            if creation_cancelled:
+                raise asyncio.CancelledError
             self._database_key = key
             await self._passwords.start()
             await Tortoise.init(config=self._tortoise_config(), init_connections=False)
@@ -127,10 +134,10 @@ class AccountStore:
             self._migrated = False
             return ()
         config = self._tortoise_config()
-        await Tortoise.init(config=config, init_connections=False)
-        executor = MigrationExecutor(get_connection("default"), config["apps"])
+        connection = get_connection("default")
+        await connection.create_connection(with_db=True)
+        executor = MigrationExecutor(connection, config["apps"])
         steps = await executor.plan()
-        await Tortoise.init(config=config)
         migration_plan = tuple(
             f"{'-' if step.backward else '+'} {step.migration.app_label}.{step.migration.name}" for step in steps
         )
@@ -158,7 +165,14 @@ class AccountStore:
         if not account.is_active:
             await self._passwords.verify_unknown(password)
             return False
-        return await self._passwords.verify(account.password_hash, password)
+        if not await self._passwords.verify(account.password_hash, password):
+            return False
+        current_account = await AccountRecord.get_or_none(id=account.id)
+        return (
+            current_account is not None
+            and current_account.is_active
+            and current_account.password_hash == account.password_hash
+        )
 
     async def _cleanup_failed_initialisation(self, created_database_key: bool) -> None:
         """Close partial state and remove a key created by this failed invocation."""
@@ -171,8 +185,25 @@ class AccountStore:
             self._started = False
             self._migrated = False
             self._database_key = None
+            for database_path in self._database_files:
+                if await database_path.exists():
+                    await database_path.unlink()
             if created_database_key:
                 await self._secrets.delete(DATABASE_KEY_REFERENCE)
+
+    async def _create_database_key(self, key: bytes) -> bool:
+        """Create a key to completion and report whether the caller cancelled."""
+        creation = asyncio.create_task(
+            self._secrets.create(DATABASE_KEY_REFERENCE, base64.b64encode(key).decode("ascii"))
+        )
+        cancelled = False
+        while not creation.done():
+            try:
+                await asyncio.shield(creation)
+            except asyncio.CancelledError:
+                cancelled = True
+        await creation
+        return cancelled
 
     async def _resolve_database_key(self) -> bytes:
         encoded_key = await self._secrets.resolve(DATABASE_KEY_REFERENCE)
@@ -206,11 +237,19 @@ class AccountStore:
         """Return the configured encrypted database path."""
         return self._config_dir / DATABASE_FILENAME
 
+    @property
+    def _database_files(self) -> tuple[AsyncPath, AsyncPath, AsyncPath]:
+        """Return the database file and SQLite write-ahead-log sidecars."""
+        database_path = self._database_path
+        return database_path, AsyncPath(f"{database_path}-wal"), AsyncPath(f"{database_path}-shm")
+
     def _tortoise_config(self) -> dict[str, Any]:
         key = self._database_key
         if key is None:
             raise AccountStoreError("Account store database key is unavailable")
         return {
+            "use_tz": True,
+            "timezone": "UTC",
             "connections": {
                 "default": {
                     "engine": "tortoise_sqlcipher.sqlite_sqlcipher",
