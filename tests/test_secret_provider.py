@@ -13,6 +13,7 @@ from keyring.errors import NoKeyringError
 from auth_guide.secrets import (
     MissingSecretError,
     PlatformSecretProvider,
+    SecretAlreadyExistsError,
     SecretProviderError,
     SecretReference,
 )
@@ -142,6 +143,28 @@ def test_missing_reference_raises_secret_safe_error() -> None:
     asyncio.run(exercise())
 
 
+def test_concurrent_explicit_secret_creation_allows_one_creator() -> None:
+    async def exercise() -> None:
+        reference = SecretReference("database-key")
+        keyring = MemoryKeyring()
+
+        async with PlatformSecretProvider("auth-guide", keyring) as provider:
+            first, second = await asyncio.gather(
+                provider.create(reference, "first-initial-value"),
+                provider.create(reference, "second-initial-value"),
+                return_exceptions=True,
+            )
+
+        assert sum(result is None for result in (first, second)) == 1
+        assert sum(isinstance(result, SecretAlreadyExistsError) for result in (first, second)) == 1
+        assert keyring.values[("auth-guide", "database-key")] in {
+            "first-initial-value",
+            "second-initial-value",
+        }
+
+    asyncio.run(exercise())
+
+
 def test_cancelled_mutation_completes_on_a_best_effort_basis() -> None:
     async def exercise() -> None:
         keyring = BlockingKeyring()
@@ -246,6 +269,8 @@ def test_closed_provider_rejects_every_public_operation() -> None:
             await provider.resolve(reference)
         with pytest.raises(SecretProviderError, match="not running"):
             await provider.store(reference, "replacement-value")
+        with pytest.raises(SecretProviderError, match="not running"):
+            await provider.create(reference, "initial-value")
         with pytest.raises(SecretProviderError, match="not running"):
             await provider.delete(reference)
 

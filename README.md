@@ -6,13 +6,15 @@
 [![PyPI downloads](https://img.shields.io/pypi/dm/auth-guide.svg?logo=pypi&logoColor=white)](https://pypi.org/project/auth-guide/)
 [![Python versions](https://img.shields.io/pypi/pyversions/auth-guide.svg?logo=python&logoColor=white)](https://pypi.org/project/auth-guide/)
 
-Reference OIDC provider service and administration CLI for the future
-`auth-ref-oidc` integration in mcp-guide.
+auth-guide is the reference auth-provider: a working example OIDC provider and
+provider API for use with mcp-guide. Account management, authentication, token
+issuance, and the provider API are its core purpose—not speculative platform
+infrastructure.
 
 Requires Python 3.12 or later.
 
-The account schema and OIDC endpoints remain future changes. Persistent account
-data will use an encrypted database.
+Account schema and OIDC endpoint work is delivered through separately scoped
+changes. Persistent account data uses an encrypted database.
 
 ## Local TLS authority
 

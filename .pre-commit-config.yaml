@@ -53,4 +53,4 @@ repos:
     rev: v2.15
     hooks:
       - id: vulture
-        args: ['src', 'tests']
+        args: ['src', 'tests', '.vulture_whitelist.txt']
