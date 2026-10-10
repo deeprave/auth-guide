@@ -6,6 +6,10 @@ import asyncio
 import ipaddress
 import json
 import logging
+import os
+import ssl
+import stat
+import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -345,6 +349,11 @@ class LocalCertificateAuthority:
                 ),
             )
 
+    async def get_active_server_ssl_context(self) -> ssl.SSLContext:
+        """Load active TLS material into an in-memory server context."""
+        material = await self.get_active_server_tls_material()
+        return await self._certificate_operations.call(partial(_create_server_ssl_context, material))
+
     async def get_certificate_lifecycle(self) -> CertificateLifecycle:
         """Return the active and retired certificate records for lifecycle audit."""
         document = await _read_metadata_document(self._metadata_path)
@@ -359,6 +368,56 @@ class LocalCertificateAuthority:
             active=_metadata_from_record(_mapping(document, "active_certificate")),
             retired=tuple(_metadata_from_record(cast(dict[str, object], record)) for record in retired_records),
         )
+
+
+def _create_server_ssl_context(material: ServerTLSMaterial) -> ssl.SSLContext:
+    """Create a TLS context from exclusive, short-lived certificate files."""
+    directory_path = Path(tempfile.mkdtemp(prefix="auth-guide-tls-"))
+    os.chmod(directory_path, 0o700)
+    if stat.S_IMODE(directory_path.stat().st_mode) != 0o700:
+        raise PermissionError("TLS runtime directory permissions are not owner-only")
+
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    directory_fd = os.open(directory_path, directory_flags)
+    try:
+        certificate_name = "certificate.pem"
+        private_key_name = "private-key.pem"
+        _write_private_runtime_file(directory_fd, certificate_name, material.certificate_pem.encode("ascii"))
+        _write_private_runtime_file(directory_fd, private_key_name, material.private_key_pem.encode("ascii"))
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(str(directory_path / certificate_name), str(directory_path / private_key_name))
+        return context
+    finally:
+        for name in ("private-key.pem", "certificate.pem"):
+            try:
+                os.unlink(name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                continue
+        os.close(directory_fd)
+        os.rmdir(directory_path)
+
+
+def _write_private_runtime_file(directory_fd: int, name: str, contents: bytes) -> None:
+    """Exclusively create a runtime file with exact owner-only permissions."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    file_descriptor = os.open(name, flags, 0o600, dir_fd=directory_fd)
+    try:
+        os.fchmod(file_descriptor, 0o600)
+        if stat.S_IMODE(os.fstat(file_descriptor).st_mode) != 0o600:
+            raise PermissionError("TLS runtime file permissions are not owner-only")
+        offset = 0
+        while offset < len(contents):
+            offset += os.write(file_descriptor, contents[offset:])
+    finally:
+        os.close(file_descriptor)
 
 
 async def _delete_secret_references(secrets: PlatformSecretProvider, *references: SecretReference) -> None:

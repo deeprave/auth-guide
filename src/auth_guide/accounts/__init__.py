@@ -14,9 +14,16 @@ from tortoise.connection import get_connection
 from tortoise.migrations.api import migrate
 from tortoise.migrations.executor import MigrationExecutor
 
-from auth_guide.accounts.models import AccountRecord, Grant
+from auth_guide.accounts.models import AccountRecord, AccountTokenRecord, Grant
 from auth_guide.accounts.passwords import PasswordOperations
+from auth_guide.accounts.tokens import (
+    NewAccountToken,
+    generate_account_token,
+    resolve_account_token,
+    verify_account_token,
+)
 from auth_guide.secrets import (
+    MissingSecretError,
     PlatformSecretProvider,
     SecretAlreadyExistsError,
     SecretReference,
@@ -27,10 +34,15 @@ DATABASE_FILENAME = "auth-guide.sqlite3"
 
 __all__ = [
     "AccountRecord",
+    "AccountTokenRecord",
     "AccountStore",
     "AccountStoreError",
     "DATABASE_FILENAME",
     "Grant",
+    "NewAccountToken",
+    "generate_account_token",
+    "resolve_account_token",
+    "verify_account_token",
 ]
 
 
@@ -48,6 +60,7 @@ class AccountStore:
         self._database_key: bytes | None = None
         self._started = False
         self._migrated = False
+        self._initialised_here = False
 
     async def __aenter__(self) -> "AccountStore":
         await self.start()
@@ -64,7 +77,11 @@ class AccountStore:
         self._database_key = await self._resolve_database_key()
         await self._passwords.start()
         try:
-            await Tortoise.init(config=self._tortoise_config(), init_connections=False)
+            await Tortoise.init(
+                config=self._tortoise_config(),
+                init_connections=False,
+                _enable_global_fallback=True,
+            )
             self._started = True
         except BaseException:
             await self._passwords.aclose()
@@ -94,11 +111,32 @@ class AccountStore:
             await Tortoise.init(config=self._tortoise_config(), init_connections=False)
             self._started = True
             await migrate(config=self._tortoise_config())
-            await Tortoise.init(config=self._tortoise_config())
+            await Tortoise.init(config=self._tortoise_config(), _enable_global_fallback=True)
             self._migrated = True
+            self._initialised_here = True
         except BaseException:
             await self._cleanup_failed_initialisation(created_database_key)
             raise
+
+    async def remove_orphan_database_key(self) -> None:
+        """Remove a present database key only when no database exists."""
+        if await self._database_path.exists():
+            raise AccountStoreError("Account database already exists")
+        if self._started:
+            await self.aclose()
+            self._database_key = None
+            self._passwords = PasswordOperations()
+        try:
+            await self._secrets.resolve(DATABASE_KEY_REFERENCE)
+        except MissingSecretError as error:
+            raise AccountStoreError("Account database key does not exist") from error
+        await self._secrets.delete(DATABASE_KEY_REFERENCE)
+
+    async def rollback_initialisation(self) -> None:
+        """Remove only database state created by this store's initialisation."""
+        if not self._initialised_here:
+            raise AccountStoreError("Account store has no initialisation to roll back")
+        await self._cleanup_failed_initialisation(created_database_key=True)
 
     async def aclose(self) -> None:
         """Close database connections owned by this store."""
@@ -154,7 +192,22 @@ class AccountStore:
         """Persist a fixed-policy Argon2id verifier on an account record."""
         await self._require_migrated()
         account.password_hash = await self._passwords.hash(password)
-        await account.save(update_fields=["password_hash"])
+        account.must_change_password = False
+        await account.save(update_fields=["password_hash", "must_change_password"])
+
+    async def create_account(self, account: AccountRecord, password: str) -> None:
+        """Persist a newly provisioned account and its initial password together."""
+        await self._require_migrated()
+        account.password_hash = await self._passwords.hash(password)
+        account.must_change_password = True
+        await account.save()
+
+    async def reset_password(self, account: AccountRecord, password: str) -> None:
+        """Replace a managed account password and require its next change."""
+        await self._require_migrated()
+        account.password_hash = await self._passwords.hash(password)
+        account.must_change_password = True
+        await account.save(update_fields=["password_hash", "must_change_password"])
 
     async def verify_password(self, account: AccountRecord | None, password: str) -> bool:
         """Verify an active account password against its fixed Argon2id policy."""
@@ -184,6 +237,7 @@ class AccountStore:
         finally:
             self._started = False
             self._migrated = False
+            self._initialised_here = False
             self._database_key = None
             for database_path in self._database_files:
                 if await database_path.exists():

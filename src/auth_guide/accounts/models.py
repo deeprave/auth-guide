@@ -20,10 +20,12 @@ logger = logging.getLogger(__name__)
 
 
 class Grant(StrEnum):
-    """The one global grant persisted for each provider account."""
+    """Recognised capability grants persisted for provider accounts."""
 
-    USER = "user"
-    ADMIN = "admin"
+    GUIDE_ADMIN = "guide:admin"
+    ACCOUNTS_READ = "accounts:read"
+    ACCOUNTS_MANAGE = "accounts:manage"
+    TOKENS_MANAGE = "tokens:manage"
 
 
 class AccountQuerySet(QuerySet):
@@ -65,11 +67,12 @@ class AccountRecord(Model):
     id = fields.UUIDField(primary_key=True)
     email = fields.CharField(max_length=254)
     email_comparison = fields.CharField(max_length=254, unique=True)
-    grant = fields.CharField(max_length=5)
-    password_hash = fields.TextField(null=True)
+    grants = fields.JSONField()
+    password_hash = fields.TextField()
     created_at = fields.DatetimeField(auto_now_add=True)
     expires_at = fields.DatetimeField(null=True)
     full_name = fields.TextField(null=True)
+    must_change_password = fields.BooleanField(default=False)
 
     class Meta:
         table = "accounts"
@@ -86,9 +89,8 @@ class AccountRecord(Model):
         return self.expires_at is None or self.expires_at > datetime.now(timezone.utc)
 
     def has_grant(self, requested_grant: Grant) -> bool:
-        """Report whether an active account has an effective global grant."""
-        grant = Grant(self.grant)
-        return self.is_active and (grant == Grant.ADMIN or grant == requested_grant)
+        """Report whether an active account holds the requested grant."""
+        return self.is_active and requested_grant in self.grants
 
     async def save(
         self,
@@ -105,14 +107,51 @@ class AccountRecord(Model):
                 fields_to_update.add("email_comparison")
         if fields_to_update is None or "expires_at" in fields_to_update:
             self.update_from_dict({"expires_at": await normalise_account_expiry(self.expires_at)})
-        if fields_to_update is None or "grant" in fields_to_update:
-            try:
-                Grant(self.grant)
-            except ValueError as error:
-                raise ValueError("Account grant is invalid") from error
+        if fields_to_update is None or "grants" in fields_to_update:
+            self.grants = await normalise_grants(self.grants)
         if fields_to_update is None or "password_hash" in fields_to_update:
             if self.password_hash is not None and not PasswordOperations.is_current_verifier(self.password_hash):
                 raise ValueError("Account password verifier is invalid")
+        await super().save(
+            using_db=using_db,
+            update_fields=fields_to_update,
+            force_create=force_create,
+            force_update=force_update,
+        )
+
+
+class AccountTokenRecord(Model):
+    """A revocable account token represented only by its verifier and metadata."""
+
+    id = fields.UUIDField(primary_key=True)
+    account = fields.ForeignKeyField("accounts.AccountRecord", related_name="tokens", on_delete=fields.CASCADE)
+    label = fields.TextField()
+    verifier = fields.CharField(max_length=64, unique=True)
+    scopes = fields.JSONField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "account_tokens"
+
+    async def save(
+        self,
+        using_db: BaseDBAsyncClient | None = None,
+        update_fields: Iterable[str] | None = None,
+        force_create: bool = False,
+        force_update: bool = False,
+    ) -> None:
+        """Validate immutable token properties and its mutable label."""
+        fields_to_update = set(update_fields) if update_fields is not None else None
+        if self._saved_in_db and (fields_to_update is None or fields_to_update - {"label"}):
+            raise ValueError("Only an account token label may be updated")
+        if fields_to_update is None or "label" in fields_to_update:
+            if not self.label:
+                raise ValueError("Account token label is required")
+        if fields_to_update is None or "verifier" in fields_to_update:
+            if len(self.verifier) != 64 or any(character not in "0123456789abcdef" for character in self.verifier):
+                raise ValueError("Account token verifier is invalid")
+        if fields_to_update is None or "scopes" in fields_to_update:
+            self.scopes = await normalise_grants(self.scopes)
         await super().save(
             using_db=using_db,
             update_fields=fields_to_update,
@@ -141,3 +180,17 @@ async def normalise_account_expiry(expires_at: datetime | None) -> datetime | No
     if expires_at.tzinfo is None or expires_at.utcoffset() is None:
         raise ValueError("Account expiry must include a timezone")
     return expires_at.astimezone(timezone.utc)
+
+
+async def normalise_grants(grants: Iterable[Grant | str]) -> list[str]:
+    """Validate a complete account grant or token scope set."""
+    if isinstance(grants, str):
+        raise ValueError("Grant set must be an array")
+    values = list(grants)
+    try:
+        normalised = [str(Grant(value)) for value in values]
+    except ValueError as error:
+        raise ValueError("Grant set contains an unknown grant") from error
+    if len(set(normalised)) != len(normalised):
+        raise ValueError("Grant set must not contain duplicates")
+    return normalised

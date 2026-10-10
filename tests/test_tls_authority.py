@@ -86,20 +86,9 @@ class RetryableRemovalTrustStore(RecordingTrustStore):
         await super().uninstall_certificate(certificate_pem, certificate_fingerprint=certificate_fingerprint)
 
 
-async def probe_active_leaf(
-    authority: LocalCertificateAuthority, directory: AsyncPath, trusted_root: str | None = None
-) -> int:
+async def probe_active_leaf(authority: LocalCertificateAuthority, trusted_root: str | None = None) -> int:
     """Connect through TLS using the authority root and return the leaf serial."""
-    material = await authority.get_active_server_tls_material()
-    await directory.mkdir()
-    certificate_path = directory / "server-certificate.pem"
-    private_key_path = directory / "server-private-key.pem"
-    await certificate_path.write_text(material.certificate_pem, encoding="ascii")
-    await private_key_path.write_text(material.private_key_pem, encoding="ascii")
-    await private_key_path.chmod(0o600)
-
-    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_context.load_cert_chain(str(certificate_path), str(private_key_path))
+    server_context = await authority.get_active_server_ssl_context()
 
     async def handle_connection(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.write(b"ok")
@@ -266,9 +255,9 @@ async def test_new_https_connections_use_the_active_rotated_leaf(tmp_path: Path)
     async with PlatformSecretProvider("auth-guide", MemoryKeyring()) as secrets:
         async with LocalCertificateAuthority(tmp_path / "authority", secrets) as authority:
             original = await authority.initialise()
-            original_serial = await probe_active_leaf(authority, AsyncPath(tmp_path / "first"))
+            original_serial = await probe_active_leaf(authority)
             replacement = await authority.rotate_server_certificate(("localhost", "127.0.0.1", "::1"))
-            replacement_serial = await probe_active_leaf(authority, AsyncPath(tmp_path / "second"))
+            replacement_serial = await probe_active_leaf(authority)
 
     assert original_serial == int(original.serial_number)
     assert replacement_serial == int(replacement.serial_number)
@@ -296,9 +285,7 @@ async def test_emergency_ca_rotation_replaces_the_trusted_root_and_active_leaf(t
             original = await authority.initialise()
             await authority.install_system_trust(trust_store)
             replacement = await authority.rotate_certificate_authority(trust_store)
-            assert await probe_active_leaf(authority, AsyncPath(tmp_path / "replacement")) == int(
-                replacement.serial_number
-            )
+            assert await probe_active_leaf(authority) == int(replacement.serial_number)
 
     assert replacement.serial_number != original.serial_number
     assert len(keyring.values) == 2
