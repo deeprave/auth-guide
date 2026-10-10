@@ -8,8 +8,17 @@ from uuid import uuid4
 import pytest
 from anyio import Path
 
-from auth_guide.accounts import DATABASE_FILENAME, AccountRecord, AccountStore, AccountStoreError, Grant
-from auth_guide.accounts.models import normalise_account_email
+from auth_guide.accounts import (
+    DATABASE_FILENAME,
+    AccountRecord,
+    AccountStore,
+    AccountStoreError,
+    AccountTokenRecord,
+    Grant,
+    generate_account_token,
+    verify_account_token,
+)
+from auth_guide.accounts.models import normalise_account_email, normalise_grants
 from auth_guide.secrets import MissingSecretError, PlatformSecretProvider, SecretReference
 
 
@@ -36,18 +45,20 @@ async def test_account_record_exposes_all_metadata_and_effective_grants() -> Non
         id=uuid4(),
         email="member@example.com",
         email_comparison="member@example.com",
-        grant=Grant.ADMIN,
+        grants=[Grant.GUIDE_ADMIN, Grant.ACCOUNTS_MANAGE],
         password_hash="verifier",
         created_at=datetime.now(timezone.utc),
         expires_at=None,
         full_name="Ada Lovelace",
+        must_change_password=False,
     )
 
     assert account.full_name == "Ada Lovelace"
     assert account.created_at.utcoffset() == timedelta(0)
     assert account.is_active
-    assert account.has_grant(Grant.ADMIN)
-    assert account.has_grant(Grant.USER)
+    assert account.has_grant(Grant.GUIDE_ADMIN)
+    assert account.has_grant(Grant.ACCOUNTS_MANAGE)
+    assert not account.has_grant(Grant.ACCOUNTS_READ)
 
 
 @pytest.mark.anyio
@@ -57,15 +68,15 @@ async def test_expired_account_retains_its_record_but_has_no_effective_grant() -
         id=uuid4(),
         email="expired@example.com",
         email_comparison="expired@example.com",
-        grant=Grant.USER,
-        password_hash=None,
+        grants=[Grant.ACCOUNTS_READ],
+        password_hash="verifier",
         created_at=datetime.now(timezone.utc),
         expires_at=datetime.now(timezone.utc) - timedelta(seconds=1),
         full_name=None,
     )
 
     assert not account.is_active
-    assert not account.has_grant(Grant.USER)
+    assert not account.has_grant(Grant.ACCOUNTS_READ)
     assert account.email == "expired@example.com"
 
 
@@ -78,6 +89,51 @@ async def test_email_normalisation_preserves_the_local_part_and_normalises_domai
         "email": "e\u0301xample@example.com",
         "email_comparison": "e\u0301xample@example.com",
     }
+
+
+@pytest.mark.anyio
+async def test_grant_sets_accept_only_recognised_unique_values() -> None:
+    """Grant persistence preserves a complete, valid capability set."""
+    assert await normalise_grants([Grant.GUIDE_ADMIN, "tokens:manage"]) == [
+        "guide:admin",
+        "tokens:manage",
+    ]
+
+    with pytest.raises(ValueError, match="unknown grant"):
+        await normalise_grants(["future:capability"])
+
+    with pytest.raises(ValueError, match="must not contain duplicates"):
+        await normalise_grants(["accounts:read", "accounts:read"])
+
+
+@pytest.mark.anyio
+async def test_account_token_record_keeps_only_non_secret_token_metadata() -> None:
+    """The persisted token record contains a verifier but never its raw bearer."""
+    token = AccountTokenRecord(
+        id=uuid4(),
+        account_id=uuid4(),
+        label="laptop",
+        verifier="0" * 64,
+        scopes=[Grant.ACCOUNTS_READ],
+        created_at=datetime.now(timezone.utc),
+    )
+
+    assert token.label == "laptop"
+    assert token.verifier == "0" * 64
+    assert token.scopes == [Grant.ACCOUNTS_READ]
+    assert not hasattr(token, "token")
+
+
+@pytest.mark.anyio
+async def test_generated_account_token_is_opaque_and_verifies_only_its_own_value() -> None:
+    """A raw token is prefixed, 256-bit opaque material with verifier-only storage."""
+    token = await generate_account_token()
+
+    assert token.raw_value.startswith("agt_")
+    assert len(token.raw_value.removeprefix("agt_")) == 43
+    assert len(token.verifier) == 64
+    assert await verify_account_token(token.raw_value, token.verifier)
+    assert not await verify_account_token(f"{token.raw_value}x", token.verifier)
 
 
 @pytest.mark.anyio

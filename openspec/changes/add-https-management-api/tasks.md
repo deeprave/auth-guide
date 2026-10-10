@@ -2,10 +2,16 @@
 
 ## 1. Secure control plane
 
-- [ ] 1.1 Add local HTTPS service startup using the active local-CA certificate and verify cleartext management access is unavailable
-- [ ] 1.2 Implement atomic first-admin bootstrap and authenticated account, password, and grant mutations and verify authorisation failures do not mutate storage
+- [x] 1.1 Add FastAPI/Pydantic routes and generated OpenAPI contract, served by one HTTPS-only Uvicorn process using the active local-CA certificate; disable public API documentation interfaces and verify cleartext management access is unavailable
+- [x] 1.2 Implement CLI-led HTTPS initial setup that accepts a validated administrator email and succeeds only when the encrypted database and named key are absent; delegate database/key creation and migrations to account-store lifecycle APIs; create the initial account with `guide:admin`, `accounts:read`, `accounts:manage`, and `tokens:manage`, then return a 12-character printable-ASCII initial password and appropriately scoped initial account access token exactly once; compensate failed setup without deleting pre-existing state; and set must_change_password
+- [x] 1.3 Replace the account's single-grant column with a validated JSON-array `grants` field and store validated token scopes as a JSON array; implement `agt_`-prefixed opaque 256-bit account access-token generation and SHA-256 verifier storage for active accounts; constrain each token's scopes to its owner's grants, and authenticate a valid token forwarded from the MCP request's Authorization header by the future Guide auth-provider without a dedicated Guide-user scope
+- [x] 1.4 Add the must_change_password account field with a false default; clear it on successful password change
+- [x] 1.5 Implement `accounts:manage`-only account creation with a required 12-character-minimum initial password, deletion, complete-grant-set replacement, password reset, and reactivation; apply the same password minimum to self-service replacement; generate the initial password verifier before one complete account-record persistence so failure creates no account; implement active-account self-service account reads plus full-name/email updates, password replacement, and account closure; permit `accounts:read` holders to read or list every account; enforce email and grant validation, uniqueness, ownership, and non-mutation on authorisation failure
+- [x] 1.6 Implement required-label multi-token listing, label-only update, and permanent revocation; setup labels its initial token admin, later creation accepts a caller-supplied label, scopes and credential material remain immutable, listings return all non-secret metadata, callers without tokens:manage may list, relabel, and revoke only their own tokens, callers with it may do so for any account's tokens, and replacement is create-then-revoke
+- [x] 1.7 Implement self-issued tokens for active authenticated users and delegated issuance for active callers holding tokens:manage, without requiring `guide:admin` or `accounts:manage` for delegated issuance; reject requested scopes outside the presenting token's scope set or the receiving account's grants
+- [x] 1.8 Implement explicit orphan-key recovery for setup: only an opt-in request with an absent database and present named key may remove that key before ordinary setup; reject every database-bearing or key-absent recovery state without mutation, and test all states without returning key material
 
 ## 2. End-to-end validation
 
-- [ ] 2.1 Exercise every management operation through trusted HTTPS and verify no client database path or credential is accepted
-- [ ] 2.2 Run TLS, bootstrap-race, unauthorised, and secret-safe diagnostics integration tests
+- [x] 2.1 Exercise every management operation through trusted HTTPS, validate the generated OpenAPI contract, and verify no client database path or credential is accepted
+- [x] 2.2 Run TLS, bootstrap-race, unauthorised, token-lifecycle, and secret-safe diagnostics integration tests

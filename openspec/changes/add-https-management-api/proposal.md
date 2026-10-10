@@ -9,7 +9,9 @@ plane with provider-owned authorisation and bootstrap validation.
 ## What Changes
 
 - Add HTTPS-only authenticated management operations for bootstrap, account
-  CRUD, password reset, and user/admin grant assignment.
+  lifecycle, password reset, and complete account-grant replacement.
+- Add explicit, key-only recovery for a failed bootstrap that leaves no
+  database but does leave its platform-secret key.
 - Reject cleartext transport and unauthorised mutations.
 - Keep all database access inside the provider.
 
