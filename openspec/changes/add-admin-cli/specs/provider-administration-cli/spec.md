@@ -57,6 +57,17 @@ provider setup has already completed.
 - **THEN** the CLI reports the provider state error without replacing accounts,
   credentials, database state, or keys
 
+### Requirement: Native system-trust HTTPS client
+The CLI SHALL make management-API requests through the operating system's
+native TLS trust store. A locally installed provider root certificate SHALL be
+trusted without `SSL_CERT_FILE` or `SSL_CERT_DIR` overrides; the CLI SHALL
+ignore those variables so they cannot replace native trust.
+
+#### Scenario: Trusted local provider connection
+- **WHEN** the local provider CA has been installed in the system trust store
+- **AND** `SSL_CERT_FILE` or `SSL_CERT_DIR` is supplied by the caller
+- **THEN** the CLI can connect to the provider through its HTTPS address
+
 ### Requirement: Secret-safe interaction
 The CLI SHALL acquire passwords through a prompt or controlled input channel.
 It SHALL read an operator bearer from `AUTH_GUIDE_TOKEN` or, only when a
@@ -133,7 +144,9 @@ retaining `path`.
   configured
 
 ### Requirement: Configurable secret-safe logging
-The provider SHALL expose TRACE, DEBUG, INFO, WARN, and CRITICAL logging levels.
+The provider SHALL expose Python's standard DEBUG, INFO, WARNING, ERROR, and
+CRITICAL logging levels, plus TRACE below DEBUG. It SHALL accept WARN as an
+alias for WARNING.
 It SHALL report every non-secret operational status, warning, and failure
 through the configured logger once command configuration is available. It SHALL
 emit colourised Rich console logging with no timestamp or visible level name by
@@ -150,9 +163,11 @@ explicit `log_level`, `AG_LOGLEVEL`, or `--log-level`/`-v` SHALL apply to every
 enabled persistent handler; otherwise enabled file and syslog handlers use DEBUG. For
 CLI-only operations, `AG_CLILOG=false` or `--no-cli-log`/`-N` SHALL suppress
 file and syslog output. File and syslog handlers SHALL default to Guide's
-timestamped formatter and SHALL apply Guide-compatible redaction before any
-configured textual formatter. Passwords and raw issued tokens SHALL never be
-logged. The generated configuration scaffold SHALL include a commented,
+timestamped formatter and route messages through a redaction extension point
+before any configured textual formatter. This change's extension point SHALL
+be an inert pass-through; passwords and raw issued tokens SHALL instead be
+kept out of logging by the CLI input and output boundary. The generated
+configuration scaffold SHALL include the `log_cli` Boolean and a commented,
 currently inert `redactor_file` pointer reserved for a future declarative
 redaction-rules file; this change SHALL not load custom redaction rules.
 

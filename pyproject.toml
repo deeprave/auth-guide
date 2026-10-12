@@ -30,6 +30,7 @@ dependencies = [
     "keyring>=25.7.0",
     "rich>=15.0.0",
     "tortoise-sqlcipher>=0.5.0",
+    "truststore>=0.10.4",
     "uvicorn>=0.54.0",
 ]
 

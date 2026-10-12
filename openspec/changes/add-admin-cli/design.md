@@ -47,6 +47,7 @@ The CLI is a management-API client and must not have database knowledge.
   `log_level`/`AG_LOGLEVEL`/`--log-level` applies to every enabled persistent handler;
   otherwise enabled persistent handlers default to DEBUG. `--no-cli-log`/`-N`
   or `AG_CLILOG=false` suppresses file and syslog handlers for CLI-only work.
+  The generated configuration names the same Boolean `log_cli`.
 - Generated bootstrap passwords and raw tokens bypass logging entirely and are
   the only direct secret-bearing terminal output.
 - Use the configured logger for non-secret operational status, warnings, and
@@ -59,8 +60,10 @@ The CLI is a management-API client and must not have database knowledge.
 - File and syslog handlers use Guide's conventional default:
   `%(asctime)s - %(name)s - %(levelname)s - %(message)s` with
   `%Y-%m-%d %H:%M:%S` timestamps and optional structured extras. A
-  provider-owned redactor is applied before every formatter, including custom
-  textual layouts; it adopts Guide's current secret-redaction strategy.
+  provider-owned redaction extension point sits before every formatter,
+  including custom textual layouts, but is an inert pass-through in this
+  change. Secret safety comes from never sending passwords or raw tokens to a
+  logger.
 - Reserve a non-secret `redactor_file` TOML setting in the generated
   configuration scaffold. It is a documented, currently inert pointer to a
   future declarative regex-replacement rules file; this change does not load

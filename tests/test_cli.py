@@ -5,6 +5,7 @@ import logging
 import os
 import socket
 import ssl
+from platform import system
 
 import anyio
 import httpx
@@ -18,6 +19,7 @@ from auth_guide.cli.config import create_configuration_file, resolve_configurati
 from auth_guide.cli.logging import RedactingFormatter, configure_logging
 from auth_guide.management_api import create_management_application, create_management_server
 from auth_guide.secrets import PlatformSecretProvider
+from auth_guide.system_trust import select_system_trust_store
 from auth_guide.tls import LocalCertificateAuthority
 
 
@@ -128,7 +130,7 @@ async def test_unavailable_persistent_log_path_is_a_concise_console_error(tmp_pa
 async def test_invalid_environment_log_level_is_a_concise_console_error(tmp_path) -> None:
     """Invalid non-CLI log configuration never exposes an exception traceback."""
     environment = dict(os.environ)
-    environment["AG_LOGLEVEL"] = "WARNING"
+    environment["AG_LOGLEVEL"] = "INVALID"
 
     result = await anyio.run_process(
         ["uv", "run", "auth-guide", "--config", str(tmp_path / "config.toml"), "account", "me"],
@@ -265,6 +267,7 @@ async def test_config_init_creates_an_absent_non_secret_scaffold(tmp_path) -> No
 
     content = await configuration_file.read_text(encoding="utf-8")
     assert "redactor_file" in content
+    assert "log_cli = true" in content
     with pytest.raises(FileExistsError):
         await create_configuration_file(configuration_file)
 
@@ -306,7 +309,7 @@ async def test_config_help_hides_only_inapplicable_initialisation(tmp_path) -> N
 async def test_nested_help_ignores_invalid_persistent_logging_configuration(tmp_path) -> None:
     """Nested help remains available to diagnose persistent logging configuration."""
     configuration_file = tmp_path / "config.toml"
-    await AsyncPath(configuration_file).write_text('log_level = "WARNING"\n', encoding="utf-8")
+    await AsyncPath(configuration_file).write_text('log_level = "INVALID"\n', encoding="utf-8")
 
     result = CliRunner().invoke(cli, ["--config", str(configuration_file), "token", "create", "--help"])
 
@@ -482,8 +485,15 @@ async def test_token_commands_reject_non_uuid_record_identifiers(command: list[s
 
 
 @pytest.mark.anyio
-async def test_cli_uses_only_the_trusted_https_management_api(tmp_path) -> None:
-    """The installed CLI manages a disposable provider without database access."""
+@pytest.mark.platform_integration
+@pytest.mark.skipif(system() not in {"Darwin", "Linux"}, reason="requires a supported system trust store")
+async def test_cli_uses_only_the_trusted_https_management_api(tmp_path, monkeypatch) -> None:
+    """The installed CLI manages a system-trusted disposable provider without database access."""
+    trust_store = await select_system_trust_store()
+    if trust_store.name not in {"macos", "debian"}:
+        pytest.skip("requires macOS or a Debian-family system trust store")
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -491,12 +501,11 @@ async def test_cli_uses_only_the_trusted_https_management_api(tmp_path) -> None:
     async with PlatformSecretProvider("cli-api-test", MemoryKeyring()) as secrets:
         async with LocalCertificateAuthority(AsyncPath(tmp_path) / "tls", secrets) as authority:
             await authority.initialise()
-            root_certificate = AsyncPath(tmp_path) / "provider-root.pem"
-            await root_certificate.write_text(await authority.get_root_certificate(), encoding="utf-8")
             store = AccountStore(AsyncPath(tmp_path) / "accounts", secrets)
             server = await create_management_server(
                 create_management_application(store), authority, host="127.0.0.1", port=port
             )
+            await authority.install_system_trust(trust_store)
             serving = asyncio.create_task(server.serve(sockets=[listener]))
             while not server.started:
                 await asyncio.sleep(0)
@@ -508,13 +517,12 @@ async def test_cli_uses_only_the_trusted_https_management_api(tmp_path) -> None:
                 assert setup.status_code == 201
                 bearer = setup.json()["token"]
 
-                environment = dict(os.environ)
-                environment.update(
-                    {
-                        "AUTH_GUIDE_TOKEN": bearer,
-                        "SSL_CERT_FILE": str(root_certificate),
-                    }
-                )
+                environment = {
+                    **os.environ,
+                    "AUTH_GUIDE_TOKEN": bearer,
+                    "SSL_CERT_FILE": str(tmp_path / "untrusted-certificate.pem"),
+                    "SSL_CERT_DIR": str(tmp_path / "untrusted-certificates"),
+                }
                 own_account = await anyio.run_process(
                     ["uv", "run", "auth-guide", "--address", base_url, "account", "me"],
                     env=environment,
@@ -572,13 +580,6 @@ async def test_cli_uses_only_the_trusted_https_management_api(tmp_path) -> None:
                     env=environment,
                     check=False,
                 )
-                untrusted_environment = dict(environment)
-                untrusted_environment.pop("SSL_CERT_FILE")
-                untrusted = await anyio.run_process(
-                    ["uv", "run", "auth-guide", "--address", base_url, "account", "me"],
-                    env=untrusted_environment,
-                    check=False,
-                )
                 unauthenticated_environment = dict(environment)
                 unauthenticated_environment.pop("AUTH_GUIDE_TOKEN")
                 unauthenticated = await anyio.run_process(
@@ -620,11 +621,9 @@ async def test_cli_uses_only_the_trusted_https_management_api(tmp_path) -> None:
                 assert (await AccountRecord.get(email="member@example.com")).grants == []
                 assert bearer.encode() not in own_account.stdout + own_account.stderr
                 assert b"initial password" not in created_account.stdout + created_account.stderr
-                assert untrusted.returncode != 0
                 assert unauthenticated.returncode != 0
                 assert forbidden.returncode != 0
                 assert invalid_password.returncode != 0
-                assert bearer.encode() not in untrusted.stdout + untrusted.stderr
                 assert issued_limited.raw_value.encode() not in forbidden.stdout + forbidden.stderr
                 assert b"too short" not in invalid_password.stdout + invalid_password.stderr
                 assert (await AccountRecord.get(email="admin@example.com")).must_change_password is True
@@ -632,6 +631,7 @@ async def test_cli_uses_only_the_trusted_https_management_api(tmp_path) -> None:
                 server.should_exit = True
                 await serving
                 await store.aclose()
+                await authority.remove_system_trust(trust_store)
 
 
 @pytest.mark.anyio

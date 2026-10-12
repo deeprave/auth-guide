@@ -173,6 +173,10 @@ def validate_account_email(email: str) -> str:
     return canonical_email
 
 
+class AccountExpiryTimezoneError(ValueError):
+    """Raised when an account expiry omits its required timezone."""
+
+
 async def normalise_account_email(email: str) -> dict[str, str]:
     """Validate and normalise an email identifier for asynchronous model use."""
     canonical_email = validate_account_email(email)
@@ -184,7 +188,7 @@ async def normalise_account_expiry(expires_at: datetime | None) -> datetime | No
     if expires_at is None:
         return None
     if expires_at.tzinfo is None or expires_at.utcoffset() is None:
-        raise ValueError("Account expiry must include a timezone")
+        raise AccountExpiryTimezoneError("Account expiry must include a timezone")
     return expires_at.astimezone(timezone.utc)
 
 

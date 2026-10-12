@@ -21,6 +21,7 @@ CONFIGURATION_SCAFFOLD = """# auth-guide administration configuration
 # log_level = \"DEBUG\"
 # log_file = \"\"
 # log_syslog = false
+# log_cli = true  # Set false to suppress file and syslog handlers for CLI commands.
 # file_log_format = \"%(asctime)s - %(name)s - %(levelname)s - %(message)s\"
 # redactor_file = \"\"  # Reserved for future declarative redaction rules.
 """

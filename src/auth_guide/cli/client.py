@@ -1,9 +1,11 @@
 """Async HTTPS client for auth-guide's management API."""
 
+import ssl
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import httpx
+import truststore
 
 DEFAULT_TIMEOUT = httpx.Timeout(5.0)
 SETUP_TIMEOUT = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
@@ -47,6 +49,7 @@ class ManagementAPIClient:
                 base_url=self._configuration.address,
                 headers=headers,
                 timeout=timeout,
+                verify=truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
             ) as client:
                 response = await client.request(method, path, json=json, params=params)
         except httpx.RequestError as error:

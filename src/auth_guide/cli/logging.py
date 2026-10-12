@@ -56,12 +56,14 @@ def _level(level_name: str) -> int:
         "TRACE": TRACE,
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
         "WARN": logging.WARNING,
+        "ERROR": logging.ERROR,
         "CRITICAL": logging.CRITICAL,
     }
     level = levels.get(level_name.upper())
     if level is None:
-        raise ValueError("Log level must be TRACE, DEBUG, INFO, WARN, or CRITICAL")
+        raise ValueError("Log level must be TRACE, DEBUG, INFO, WARNING, ERROR, or CRITICAL")
     return level
 
 

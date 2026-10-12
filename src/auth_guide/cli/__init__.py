@@ -38,7 +38,7 @@ class AdministrationGroup(click.Group):
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         """Remember whether any nested command requested local help."""
-        ctx.meta["help_requested"] = "--help" in args or "-h" in args
+        ctx.meta["help_requested"] = "--help" in args
         return super().parse_args(ctx, args)
 
     def list_commands(self, ctx: click.Context) -> list[str]:
@@ -83,13 +83,13 @@ class ConfigurationGroup(click.Group):
 @click.option(
     "--log-console",
     "log_level_console",
-    type=click.Choice(["TRACE", "DEBUG", "INFO", "WARN", "CRITICAL"], case_sensitive=False),
+    type=click.Choice(["TRACE", "DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"], case_sensitive=False),
 )
 @click.option(
     "--log-level",
     "log_level",
     "-v",
-    type=click.Choice(["TRACE", "DEBUG", "INFO", "WARN", "CRITICAL"], case_sensitive=False),
+    type=click.Choice(["TRACE", "DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL"], case_sensitive=False),
 )
 @click.option("--log-file", "log_file", "-l", type=click.Path(path_type=Path))
 @click.option("--log-syslog", "log_syslog", "-S", is_flag=True, default=None)
@@ -108,6 +108,8 @@ def cli(
     cli_log: bool | None,
 ) -> None:
     """Administer an auth-guide provider through its HTTPS API."""
+    os.environ.pop("SSL_CERT_FILE", None)
+    os.environ.pop("SSL_CERT_DIR", None)
     context.ensure_object(dict)
     safe_logger = configure_safe_console_logging()
     try:

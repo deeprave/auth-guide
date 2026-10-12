@@ -23,7 +23,7 @@ from auth_guide.accounts import (
     generate_account_token,
     resolve_account_token,
 )
-from auth_guide.accounts.models import normalise_account_email
+from auth_guide.accounts.models import AccountExpiryTimezoneError, normalise_account_email
 from auth_guide.tls import LocalCertificateAuthority
 
 
@@ -137,7 +137,7 @@ class PasswordUpdate(RequestModel):
 
 def _account_validation_detail(error: ValueError) -> str:
     """Keep safe, actionable account-validation diagnostics at the API boundary."""
-    if str(error) == "Account expiry must include a timezone":
+    if isinstance(error, AccountExpiryTimezoneError):
         return str(error)
     return "Account values are invalid"
 

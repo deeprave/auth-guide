@@ -116,6 +116,7 @@ dependencies = [
     { name = "keyring" },
     { name = "rich" },
     { name = "tortoise-sqlcipher" },
+    { name = "truststore" },
     { name = "uvicorn" },
 ]
 
@@ -143,6 +144,7 @@ requires-dist = [
     { name = "keyring", specifier = ">=25.7.0" },
     { name = "rich", specifier = ">=15.0.0" },
     { name = "tortoise-sqlcipher", specifier = ">=0.5.0" },
+    { name = "truststore", specifier = ">=0.10.4" },
     { name = "uvicorn", specifier = ">=0.54.0" },
 ]
 
@@ -1136,6 +1138,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/7a/41/0e3ca3d5b402dc6d68e5b54d45c1b2cf5c8964e8c5e0701a38d57cf82447/tortoise_sqlcipher-0.5.0.tar.gz", hash = "sha256:8fffb6db29024e3b9d5152e7f03a7c1f359fd190680dc343c446f4df1f51c1e2", size = 8984, upload-time = "2026-10-09T02:20:17.22Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ef/32/ada52273cd7ed618ab414b51f2862188be2c495d7ca7ed6776e9a7bbb38b/tortoise_sqlcipher-0.5.0-py3-none-any.whl", hash = "sha256:0a6cdb3bd20f57c113209d7798b213b4343da5777855fa2b7ca39b98bf7fb1d4", size = 10121, upload-time = "2026-10-09T02:20:15.983Z" },
+]
+
+[[package]]
+name = "truststore"
+version = "0.10.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
 ]
 
 [[package]]
