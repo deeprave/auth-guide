@@ -22,13 +22,20 @@ classifiers = [
 dependencies = [
     "anyio>=4.15.1",
     "argon2-cffi>=25.1.0",
+    "click>=8.5.0",
     "cryptography>=50.0.2",
     "email-validator>=2.3.0",
     "fastapi>=0.143.0",
+    "httpx>=0.28.1",
     "keyring>=25.7.0",
+    "rich>=15.0.0",
     "tortoise-sqlcipher>=0.5.0",
+    "truststore>=0.10.4",
     "uvicorn>=0.54.0",
 ]
+
+[project.scripts]
+auth-guide = "auth_guide.cli:cli"
 
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]
@@ -67,5 +74,4 @@ dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "coverage>=7.16.2",
-    "httpx>=0.28.1",
 ]

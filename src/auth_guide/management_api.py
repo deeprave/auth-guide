@@ -4,13 +4,14 @@ import asyncio
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Self
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from tortoise.exceptions import IntegrityError
+from tortoise.transactions import in_transaction
 from uvicorn import Config, Server
 
 from auth_guide.accounts import (
@@ -22,7 +23,7 @@ from auth_guide.accounts import (
     generate_account_token,
     resolve_account_token,
 )
-from auth_guide.accounts.models import normalise_account_email
+from auth_guide.accounts.models import AccountExpiryTimezoneError, normalise_account_email
 from auth_guide.tls import LocalCertificateAuthority
 
 
@@ -64,6 +65,7 @@ class TokenCreationRequest(RequestModel):
     label: str = Field(min_length=1)
     scopes: list[Grant]
     account_id: UUID | None = None
+    account_email: str | None = None
 
 
 class TokenCreationResponse(TokenResponse):
@@ -98,6 +100,7 @@ class AccountCreationRequest(RequestModel):
     email: str
     grants: list[Grant]
     full_name: str | None = None
+    expires_at: datetime | None = None
     password: str = Field(min_length=12)
 
 
@@ -112,13 +115,40 @@ class AccountManagementUpdate(RequestModel):
     """Fields an account manager may alter on another account."""
 
     grants: list[Grant] | None = None
+    add_grants: list[Grant] | None = None
+    remove_grants: list[Grant] | None = None
     reactivate: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_grant_operation(self) -> Self:
+        """Keep complete replacement distinct from atomic grant deltas."""
+        if "grants" in self.model_fields_set and (
+            "add_grants" in self.model_fields_set or "remove_grants" in self.model_fields_set
+        ):
+            raise ValueError("Grant replacement cannot be combined with grant deltas")
+        return self
 
 
 class PasswordUpdate(RequestModel):
     """A password replacement submitted through the HTTPS control plane."""
 
     password: str = Field(min_length=12)
+
+
+def _account_validation_detail(error: ValueError) -> str:
+    """Keep safe, actionable account-validation diagnostics at the API boundary."""
+    if isinstance(error, AccountExpiryTimezoneError):
+        return str(error)
+    return "Account values are invalid"
+
+
+def _require_timezone_aware_expiry(expires_at: datetime | None) -> None:
+    """Reject an API expiry whose parsed timestamp omitted a timezone."""
+    if expires_at is not None and (expires_at.tzinfo is None or expires_at.utcoffset() is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Account expiry must include a timezone",
+        )
 
 
 class GuideAuthenticationResponse(BaseModel):
@@ -202,12 +232,6 @@ def create_management_application(account_store: AccountStore | None = None) -> 
         if grant not in principal.token.scopes or not principal.account.has_grant(grant):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token does not permit this operation")
         return principal
-
-    async def require_accounts_read(
-        principal: Annotated[AuthenticatedPrincipal, Depends(require_principal)],
-    ) -> AuthenticatedPrincipal:
-        """Require account-read authority for an all-account operation."""
-        return await require_account_grant(Grant.ACCOUNTS_READ, principal)
 
     async def require_accounts_manage(
         principal: Annotated[AuthenticatedPrincipal, Depends(require_principal)],
@@ -324,12 +348,125 @@ def create_management_application(account_store: AccountStore | None = None) -> 
         await principal.account.save(update_fields=["expires_at"])
         return principal.account
 
-    @application.get("/v1/accounts", response_model=list[AccountResponse])
+    async def resolve_account_by_email(email: str) -> AccountRecord:
+        """Resolve one complete account record from its validated email selector."""
+        try:
+            normalised_email = await normalise_account_email(email)
+        except ValueError as error:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Account email is invalid"
+            ) from error
+        account = await AccountRecord.including_inactive().get_or_none(
+            email_comparison=normalised_email["email_comparison"]
+        )
+        if account is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account does not exist")
+        return account
+
+    async def resolve_account_by_id(account_id: UUID) -> AccountRecord:
+        """Resolve one complete account record from its immutable UUID selector."""
+        account = await AccountRecord.including_inactive().get_or_none(id=account_id)
+        if account is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account does not exist")
+        return account
+
+    async def update_managed_account(
+        update: AccountManagementUpdate,
+        *,
+        account_id: UUID | None = None,
+        email: str | None = None,
+    ) -> AccountRecord:
+        """Atomically apply a complete grant replacement or grant deltas."""
+        email_comparison: str | None = None
+        if email is not None:
+            try:
+                email_comparison = (await normalise_account_email(email))["email_comparison"]
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="Account email is invalid",
+                ) from error
+
+        async with in_transaction() as connection:
+            accounts = AccountRecord.including_inactive().using_db(connection).select_for_update()
+            if account_id is not None:
+                account = await accounts.get_or_none(id=account_id)
+            else:
+                account = await accounts.get_or_none(email_comparison=email_comparison)
+            if account is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account does not exist")
+
+            update_fields: list[str] = []
+            if "grants" in update.model_fields_set:
+                account.grants = update.grants or []
+                update_fields.append("grants")
+            elif "add_grants" in update.model_fields_set or "remove_grants" in update.model_fields_set:
+                grants = set(account.grants)
+                grants.update(str(grant) for grant in update.add_grants or [])
+                grants.difference_update(str(grant) for grant in update.remove_grants or [])
+                account.grants = sorted(grants)
+                update_fields.append("grants")
+            if update.reactivate is True:
+                account.expires_at = None
+                update_fields.append("expires_at")
+            if update_fields:
+                try:
+                    await account.save(using_db=connection, update_fields=update_fields)
+                except ValueError as error:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail=_account_validation_detail(error),
+                    ) from error
+            return account
+
+    @application.get("/v1/accounts", response_model=list[AccountResponse] | AccountResponse)
     async def list_accounts(
-        _: Annotated[AuthenticatedPrincipal, Depends(require_accounts_read)],
-    ) -> list[AccountRecord]:
+        principal: Annotated[AuthenticatedPrincipal, Depends(require_principal)],
+        email: Annotated[str | None, Query()] = None,
+    ) -> list[AccountRecord] | AccountRecord:
         """List every account, including inactive records, for account readers."""
+        if email is not None:
+            try:
+                email_comparison = (await normalise_account_email(email))["email_comparison"]
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Account email is invalid"
+                ) from error
+            if email_comparison == principal.account.email_comparison:
+                return principal.account
+            await require_account_grant(Grant.ACCOUNTS_READ, principal)
+            return await resolve_account_by_email(email)
+        await require_account_grant(Grant.ACCOUNTS_READ, principal)
         return await AccountRecord.including_inactive().order_by("email_comparison")
+
+    @application.patch("/v1/accounts", response_model=AccountResponse)
+    async def manage_account_by_email(
+        update: AccountManagementUpdate,
+        email: Annotated[str, Query()],
+        _: Annotated[AuthenticatedPrincipal, Depends(require_accounts_manage)],
+    ) -> AccountRecord:
+        """Apply privileged account changes using an email selector."""
+        return await update_managed_account(update, email=email)
+
+    @application.post("/v1/accounts/password", response_model=AccountResponse)
+    async def reset_account_password_by_email(
+        update: PasswordUpdate,
+        email: Annotated[str, Query()],
+        _: Annotated[AuthenticatedPrincipal, Depends(require_accounts_manage)],
+        store: Annotated[AccountStore, Depends(require_store)],
+    ) -> AccountRecord:
+        """Reset an account password using an email selector."""
+        account = await resolve_account_by_email(email)
+        await store.reset_password(account, update.password)
+        return account
+
+    @application.delete("/v1/accounts", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_account_by_email(
+        email: Annotated[str, Query()],
+        _: Annotated[AuthenticatedPrincipal, Depends(require_accounts_manage)],
+    ) -> None:
+        """Permanently delete an account using an email selector."""
+        await (await resolve_account_by_email(email)).delete()
 
     @application.get("/v1/accounts/{account_id}", response_model=AccountResponse)
     async def read_account(
@@ -352,13 +489,19 @@ def create_management_application(account_store: AccountStore | None = None) -> 
         store: Annotated[AccountStore, Depends(require_store)],
     ) -> AccountRecord:
         """Create a new account with its complete grant set and initial password."""
-        account = AccountRecord(email=request.email, grants=request.grants, full_name=request.full_name)
+        _require_timezone_aware_expiry(request.expires_at)
+        account = AccountRecord(
+            email=request.email,
+            grants=request.grants,
+            full_name=request.full_name,
+            expires_at=request.expires_at,
+        )
         try:
             await store.create_account(account, request.password)
         except ValueError as error:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail="Account values are invalid",
+                detail=_account_validation_detail(error),
             ) from error
         except IntegrityError as error:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Account email already exists") from error
@@ -370,26 +513,8 @@ def create_management_application(account_store: AccountStore | None = None) -> 
         update: AccountManagementUpdate,
         _: Annotated[AuthenticatedPrincipal, Depends(require_accounts_manage)],
     ) -> AccountRecord:
-        """Replace grants or reactivate another account without editing its profile."""
-        account = await AccountRecord.including_inactive().get_or_none(id=account_id)
-        if account is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account does not exist")
-        update_fields: list[str] = []
-        if "grants" in update.model_fields_set:
-            account.grants = update.grants or []
-            update_fields.append("grants")
-        if update.reactivate is True:
-            account.expires_at = None
-            update_fields.append("expires_at")
-        if update_fields:
-            try:
-                await account.save(update_fields=update_fields)
-            except ValueError as error:
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="Account values are invalid",
-                ) from error
-        return account
+        """Mutate grants or reactivate another account without editing its profile."""
+        return await update_managed_account(update, account_id=account_id)
 
     @application.post("/v1/accounts/{account_id}/password", response_model=AccountResponse)
     async def reset_account_password(
@@ -420,11 +545,20 @@ def create_management_application(account_store: AccountStore | None = None) -> 
     async def list_tokens(
         principal: Annotated[AuthenticatedPrincipal, Depends(require_principal)],
         account_id: Annotated[UUID | None, Query()] = None,
+        account_email: Annotated[str | None, Query()] = None,
     ) -> list[TokenResponse]:
         """List own token metadata, or another account's with token management."""
-        target_account_id = principal.account.id if account_id is None else account_id
-        if target_account_id != principal.account.id:
+        if account_id is not None and account_email is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Specify one account selector"
+            )
+        if account_id is not None or account_email is not None:
             await require_account_grant(Grant.TOKENS_MANAGE, principal)
+        target_account_id = principal.account.id
+        if account_id is not None:
+            target_account_id = (await resolve_account_by_id(account_id)).id
+        if account_email is not None:
+            target_account_id = (await resolve_account_by_email(account_email)).id
         tokens = (
             await AccountTokenRecord.filter(account__id=target_account_id)
             .select_related("account")
@@ -438,11 +572,20 @@ def create_management_application(account_store: AccountStore | None = None) -> 
         principal: Annotated[AuthenticatedPrincipal, Depends(require_principal)],
     ) -> TokenCreationResponse:
         """Create a scope-limited token for the caller or a managed account."""
-        target_account_id = principal.account.id if request.account_id is None else request.account_id
+        if request.account_id is not None and request.account_email is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Specify one account selector"
+            )
+        if request.account_id is not None or request.account_email is not None:
+            await require_account_grant(Grant.TOKENS_MANAGE, principal)
+        target_account_id = principal.account.id
+        if request.account_id is not None:
+            target_account_id = (await resolve_account_by_id(request.account_id)).id
+        if request.account_email is not None:
+            target_account_id = (await resolve_account_by_email(request.account_email)).id
         if target_account_id == principal.account.id:
             account = principal.account
         else:
-            await require_account_grant(Grant.TOKENS_MANAGE, principal)
             account = await AccountRecord.get_or_none(id=target_account_id)
             if account is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Active account does not exist")

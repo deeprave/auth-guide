@@ -17,6 +17,14 @@ async def test_get_auth_config_dir_uses_guide_xdg_layout(monkeypatch: MonkeyPatc
 
 
 @pytest.mark.anyio
+async def test_get_auth_config_dir_uses_the_session_isolated_xdg_root(
+    isolated_configuration_root: Path,
+) -> None:
+    """The ordinary suite never resolves the user's provider configuration root."""
+    assert get_auth_config_dir() == isolated_configuration_root / "mcp-guide" / "auth"
+
+
+@pytest.mark.anyio
 async def test_get_auth_config_dir_ignores_a_relative_xdg_root(monkeypatch: MonkeyPatch) -> None:
     """A relative XDG root cannot make provider state depend on the working directory."""
     monkeypatch.setenv("XDG_CONFIG_HOME", "relative-config")

@@ -160,8 +160,8 @@ class AccountTokenRecord(Model):
         )
 
 
-async def normalise_account_email(email: str) -> dict[str, str]:
-    """Validate an email identifier without checking mailbox ownership."""
+def validate_account_email(email: str) -> str:
+    """Validate and canonicalise an email identifier without deliverability checks."""
     try:
         validated = validate_email(email, check_deliverability=False)
     except EmailNotValidError as error:
@@ -170,6 +170,16 @@ async def normalise_account_email(email: str) -> dict[str, str]:
     canonical_email = f"{local_part}@{validated.domain.lower()}"
     if len(canonical_email.encode("utf-8")) > 254:
         raise ValueError("Account email identifier is too long")
+    return canonical_email
+
+
+class AccountExpiryTimezoneError(ValueError):
+    """Raised when an account expiry omits its required timezone."""
+
+
+async def normalise_account_email(email: str) -> dict[str, str]:
+    """Validate and normalise an email identifier for asynchronous model use."""
+    canonical_email = validate_account_email(email)
     return {"email": canonical_email, "email_comparison": canonical_email.casefold()}
 
 
@@ -178,7 +188,7 @@ async def normalise_account_expiry(expires_at: datetime | None) -> datetime | No
     if expires_at is None:
         return None
     if expires_at.tzinfo is None or expires_at.utcoffset() is None:
-        raise ValueError("Account expiry must include a timezone")
+        raise AccountExpiryTimezoneError("Account expiry must include a timezone")
     return expires_at.astimezone(timezone.utc)
 
 
