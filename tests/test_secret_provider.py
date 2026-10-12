@@ -327,6 +327,7 @@ def test_cancelled_failed_mutation_logs_no_secret(caplog: pytest.LogCaptureFixtu
     assert "replacement-value" not in caplog.text
 
 
+@pytest.mark.platform_integration
 @pytest.mark.skipif(system() != "Darwin", reason="requires macOS Keychain")
 def test_macos_keychain_create_replace_resolve_and_delete() -> None:
     async def exercise() -> None:
@@ -359,6 +360,7 @@ def test_macos_keychain_create_replace_resolve_and_delete() -> None:
     asyncio.run(exercise())
 
 
+@pytest.mark.platform_integration
 @pytest.mark.skipif(system() != "Linux", reason="requires Linux Freedesktop Secret Service")
 def test_linux_secret_service_create_replace_resolve_and_delete() -> None:
     async def exercise() -> None:

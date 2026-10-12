@@ -28,6 +28,12 @@ credentials.
 - **THEN** the CLI displays local help for token creation without an HTTPS
   request or token prompt
 
+#### Scenario: Persistent logging is misconfigured
+- **WHEN** an operator requests any command's local help while persistent logging
+  configuration cannot be applied
+- **THEN** the CLI displays the requested help without initialising persistent
+  logging
+
 ### Requirement: Explicit orphan-key bootstrap recovery
 The CLI SHALL expose `--remove-orphan-key` only with its first-administrator
 setup command. It SHALL send the provider's explicit orphan-key recovery
@@ -58,6 +64,9 @@ valueless `--token` option is supplied, a hidden prompt. It SHALL not accept
 secret values in ordinary arguments or normally emit them in output. Bootstrap
 SHALL require an interactive terminal and display its generated credentials only
 once.
+Before prompting for a password, a password-changing command SHALL obtain its
+required operator bearer and validate locally knowable input. It SHALL re-prompt
+for a password shorter than the API minimum rather than submit it.
 
 #### Scenario: Password is set
 - **WHEN** an administrator supplies a password through the controlled channel
@@ -66,12 +75,22 @@ once.
 ### Requirement: Human account selectors
 The CLI SHALL accept an account UUID or validated email wherever a command
 targets an account. It SHALL send exactly one selector to the management API;
-the provider SHALL resolve that selector before authorisation and mutation.
+the provider SHALL authorise and resolve that selector according to the target
+operation's access rules. The CLI SHALL trim surrounding selector whitespace and
+send UUID selectors in canonical form.
 
 #### Scenario: An email target is supplied
 - **WHEN** an operator supplies a syntactically valid account email
 - **THEN** the CLI sends it as an email selector and the provider targets that
   account without requiring the operator to discover its UUID
+
+### Requirement: Explicit empty grant replacement
+The CLI SHALL describe `grant set` as complete replacement. When no replacement
+grants are supplied, it SHALL require `--clear` before sending the empty grant set.
+
+#### Scenario: Every grant is cleared
+- **WHEN** an operator runs `auth-guide grant set ACCOUNT --clear` with no grants
+- **THEN** the CLI sends an explicit empty complete grant set
 
 ### Requirement: Separate listener and connection configuration
 The CLI SHALL resolve a default configuration file at

@@ -7,6 +7,7 @@ from base64 import b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import cast
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -364,7 +365,12 @@ async def test_account_manager_can_create_an_account_with_an_initial_password(ma
         response = await client.post(
             "/v1/accounts",
             headers={"Authorization": f"Bearer {bearer}"},
-            json={"email": "member@example.com", "grants": [], "password": "initial password"},
+            json={
+                "email": "member@example.com",
+                "grants": [],
+                "password": "initial password",
+                "expires_at": "2030-01-01T00:00:00+00:00",
+            },
         )
         missing_password = await client.post(
             "/v1/accounts",
@@ -385,6 +391,7 @@ async def test_account_manager_can_create_an_account_with_an_initial_password(ma
     assert response.status_code == 201
     assert response.json()["email"] == "member@example.com"
     assert response.json()["grants"] == []
+    assert response.json()["expires_at"] == "2030-01-01T00:00:00Z"
     assert missing_password.status_code == 422
     assert empty_password.status_code == 422
     assert short_password.status_code == 422
@@ -450,6 +457,29 @@ async def test_invalid_account_grants_are_rejected_as_client_errors(management_d
 
 
 @pytest.mark.anyio
+async def test_account_creation_reports_an_expiry_timezone_requirement(management_database) -> None:
+    """A naive account expiry returns the actionable validation error."""
+    bearer = await create_authenticated_bearer(Grant.ACCOUNTS_MANAGE)
+    application = create_management_application(cast(AccountStore, BootstrapStore()))
+    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
+        response = await client.post(
+            "/v1/accounts",
+            headers={"Authorization": f"Bearer {bearer}"},
+            json={
+                "email": "member@example.com",
+                "grants": [],
+                "expires_at": "2030-01-01T00:00:00",
+                "password": "initial password",
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Account expiry must include a timezone"
+
+
+@pytest.mark.anyio
 async def test_failed_initial_password_persistence_does_not_create_an_account(management_database) -> None:
     """A failed initial password prevents the account record being persisted."""
     bearer = await create_authenticated_bearer(Grant.ACCOUNTS_MANAGE)
@@ -496,6 +526,26 @@ async def test_account_can_update_its_profile_and_close_itself(management_databa
     assert password.json()["must_change_password"] is False
     assert closed.status_code == 200
     assert rejected.status_code == 401
+
+
+@pytest.mark.anyio
+async def test_account_can_read_itself_by_email_without_account_read_grant(management_database) -> None:
+    """A self-service bearer can use its own email but cannot probe another account."""
+    bearer = await create_authenticated_bearer()
+    await AccountRecord.create(email="member@example.com", grants=[], password_hash=TEST_PASSWORD_HASH)
+    application = create_management_application(cast(AccountStore, BootstrapStore()))
+    transport = httpx.ASGITransport(app=application)
+    headers = {"Authorization": f"Bearer {bearer}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
+        own = await client.get("/v1/accounts?email=admin@example.com", headers=headers)
+        other = await client.get("/v1/accounts?email=member@example.com", headers=headers)
+        listing = await client.get("/v1/accounts", headers=headers)
+
+    assert own.status_code == 200
+    assert own.json()["email"] == "admin@example.com"
+    assert other.status_code == 403
+    assert listing.status_code == 403
 
 
 @pytest.mark.anyio
@@ -562,8 +612,66 @@ async def test_account_manager_can_read_update_reset_and_delete_accounts(managem
 
 
 @pytest.mark.anyio
+async def test_account_manager_can_target_an_account_by_email(management_database) -> None:
+    """Email selectors are resolved by the provider for every privileged account mutation."""
+    bearer = await create_authenticated_bearer(Grant.ACCOUNTS_READ, Grant.ACCOUNTS_MANAGE)
+    await AccountRecord.create(
+        email="member@example.com",
+        grants=[Grant.ACCOUNTS_READ],
+        password_hash=TEST_PASSWORD_HASH,
+    )
+    application = create_management_application(cast(AccountStore, BootstrapStore()))
+    transport = httpx.ASGITransport(app=application)
+    headers = {"Authorization": f"Bearer {bearer}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
+        read = await client.get("/v1/accounts?email=member@example.com", headers=headers)
+        updated = await client.patch(
+            "/v1/accounts?email=member@example.com", headers=headers, json={"grants": ["tokens:manage"]}
+        )
+        reset = await client.post(
+            "/v1/accounts/password?email=member@example.com", headers=headers, json={"password": "new password"}
+        )
+        deleted = await client.delete("/v1/accounts?email=member@example.com", headers=headers)
+
+    assert read.status_code == 200
+    assert updated.json()["grants"] == ["tokens:manage"]
+    assert reset.json()["must_change_password"] is True
+    assert deleted.status_code == 204
+
+
+@pytest.mark.anyio
+async def test_account_manager_can_atomically_apply_grant_deltas(management_database) -> None:
+    """A managed update can add and remove grants without a client-side read."""
+    bearer = await create_authenticated_bearer(Grant.ACCOUNTS_MANAGE)
+    target = await AccountRecord.create(
+        email="member@example.com",
+        grants=[Grant.ACCOUNTS_READ, Grant.TOKENS_MANAGE],
+        password_hash=TEST_PASSWORD_HASH,
+    )
+    application = create_management_application(cast(AccountStore, BootstrapStore()))
+    transport = httpx.ASGITransport(app=application)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
+        updated = await client.patch(
+            f"/v1/accounts/{target.id}",
+            headers={"Authorization": f"Bearer {bearer}"},
+            json={"add_grants": ["accounts:manage"], "remove_grants": ["accounts:read"]},
+        )
+        ambiguous = await client.patch(
+            f"/v1/accounts/{target.id}",
+            headers={"Authorization": f"Bearer {bearer}"},
+            json={"grants": [], "add_grants": ["accounts:read"]},
+        )
+
+    assert updated.status_code == 200
+    assert set(updated.json()["grants"]) == {"accounts:manage", "tokens:manage"}
+    assert ambiguous.status_code == 422
+
+
+@pytest.mark.anyio
 async def test_token_manager_can_issue_and_revoke_another_accounts_token(management_database) -> None:
-    """Delegated token issuance is limited by both the caller and recipient grants."""
+    """Delegated token operations resolve either supported account selector."""
     bearer = await create_authenticated_bearer(Grant.TOKENS_MANAGE, Grant.ACCOUNTS_READ)
     target = await AccountRecord.create(
         email="member@example.com", grants=[Grant.ACCOUNTS_READ], password_hash=TEST_PASSWORD_HASH
@@ -575,16 +683,98 @@ async def test_token_manager_can_issue_and_revoke_another_accounts_token(managem
         issued = await client.post(
             "/v1/tokens",
             headers={"Authorization": f"Bearer {bearer}"},
-            json={"account_id": str(target.id), "label": "member", "scopes": ["accounts:read"]},
+            json={"account_email": "member@example.com", "label": "member", "scopes": ["accounts:read"]},
         )
         token_id = issued.json()["id"]
-        listed = await client.get(f"/v1/tokens?account_id={target.id}", headers={"Authorization": f"Bearer {bearer}"})
+        listed = await client.get(
+            "/v1/tokens?account_email=member@example.com", headers={"Authorization": f"Bearer {bearer}"}
+        )
+        ambiguous = await client.get(
+            f"/v1/tokens?account_id={target.id}&account_email=member@example.com",
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
         revoked = await client.delete(f"/v1/tokens/{token_id}", headers={"Authorization": f"Bearer {bearer}"})
 
     assert issued.status_code == 201
     assert listed.status_code == 200
     assert listed.json()[0]["id"] == token_id
+    assert ambiguous.status_code == 422
     assert revoked.status_code == 204
+
+
+@pytest.mark.anyio
+async def test_explicit_token_selectors_require_management_before_account_lookup(management_database) -> None:
+    """A self-service token cannot probe account existence through a selector."""
+    bearer = await create_authenticated_bearer()
+    await AccountRecord.create(email="member@example.com", grants=[], password_hash=TEST_PASSWORD_HASH)
+    application = create_management_application()
+    transport = httpx.ASGITransport(app=application)
+    headers = {"Authorization": f"Bearer {bearer}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
+        listed_existing = await client.get("/v1/tokens?account_email=member@example.com", headers=headers)
+        listed_missing = await client.get("/v1/tokens?account_email=missing@example.com", headers=headers)
+        created_existing = await client.post(
+            "/v1/tokens",
+            headers=headers,
+            json={"account_email": "member@example.com", "label": "member", "scopes": []},
+        )
+        created_missing = await client.post(
+            "/v1/tokens",
+            headers=headers,
+            json={"account_email": "missing@example.com", "label": "member", "scopes": []},
+        )
+
+    assert [response.status_code for response in (listed_existing, listed_missing)] == [403, 403]
+    assert [response.status_code for response in (created_existing, created_missing)] == [403, 403]
+
+
+@pytest.mark.anyio
+async def test_token_listing_rejects_an_unknown_authorised_uuid_selector(management_database) -> None:
+    """An authorised token manager cannot mistake an unknown account for an empty token list."""
+    bearer = await create_authenticated_bearer(Grant.TOKENS_MANAGE)
+    application = create_management_application()
+    transport = httpx.ASGITransport(app=application)
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
+        response = await client.get(
+            f"/v1/tokens?account_id={uuid4()}",
+            headers={"Authorization": f"Bearer {bearer}"},
+        )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.anyio
+async def test_token_creation_distinguishes_missing_and_inactive_uuid_targets(management_database) -> None:
+    """Token creation reports the actual state of an explicitly selected account."""
+    bearer = await create_authenticated_bearer(Grant.TOKENS_MANAGE)
+    inactive = await AccountRecord.create(
+        email="inactive@example.com",
+        expires_at=datetime.now(timezone.utc),
+        grants=[],
+        password_hash=TEST_PASSWORD_HASH,
+    )
+    application = create_management_application()
+    transport = httpx.ASGITransport(app=application)
+    headers = {"Authorization": f"Bearer {bearer}"}
+
+    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
+        missing = await client.post(
+            "/v1/tokens",
+            headers=headers,
+            json={"account_id": str(uuid4()), "label": "missing", "scopes": []},
+        )
+        inactive_response = await client.post(
+            "/v1/tokens",
+            headers=headers,
+            json={"account_id": str(inactive.id), "label": "inactive", "scopes": []},
+        )
+
+    assert missing.status_code == 404
+    assert missing.json()["detail"] == "Account does not exist"
+    assert inactive_response.status_code == 404
+    assert inactive_response.json()["detail"] == "Active account does not exist"
 
 
 @pytest.mark.anyio

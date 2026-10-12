@@ -1,7 +1,6 @@
 """Opt-in integration test for supported system TLS trust."""
 
 import asyncio
-import os
 import ssl
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,9 +92,10 @@ async def connect_with_native_system_trust(authority: LocalCertificateAuthority,
 
 
 @pytest.mark.skipif(
-    system() not in {"Darwin", "Linux"} or os.environ.get("AUTH_GUIDE_SYSTEM_TRUST_TESTS") != "1",
-    reason="requires an opt-in supported system trust-store modification",
+    system() not in {"Darwin", "Linux"},
+    reason="requires a supported system trust store",
 )
+@pytest.mark.platform_integration
 @pytest.mark.anyio
 async def test_system_trust_accepts_an_issued_localhost_leaf(tmp_path: Path) -> None:
     trust_store = await select_system_trust_store()
