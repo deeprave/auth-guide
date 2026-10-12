@@ -434,6 +434,27 @@ async def test_account_creation_rejects_naive_expiry_before_prompting(monkeypatc
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("command", "prompt"),
+    [
+        (["account", "create", "not-an-email"], "Initial password"),
+        (["account", "reset-password", "   "], "New password"),
+    ],
+)
+async def test_password_commands_validate_locally_before_prompting(
+    monkeypatch, command: list[str], prompt: str
+) -> None:
+    """Locally invalid account input does not consume a password prompt."""
+    monkeypatch.setenv("AUTH_GUIDE_TOKEN", "agt_example")
+
+    result = CliRunner().invoke(cli, command)
+
+    assert result.exit_code == 1
+    assert "Account email identifier is invalid" in result.output
+    assert prompt not in result.output
+
+
+@pytest.mark.anyio
 async def test_empty_grant_replacement_requires_explicit_flag() -> None:
     """Clearing every grant must be requested with the documented explicit flag."""
     result = CliRunner().invoke(cli, ["grant", "set", "member@example.com"])

@@ -12,6 +12,7 @@ from uuid import UUID
 import anyio
 import click
 
+from auth_guide.accounts.models import validate_account_email
 from auth_guide.cli.client import (
     DEFAULT_TIMEOUT,
     SETUP_TIMEOUT,
@@ -157,6 +158,23 @@ def _account_selector(account: str) -> dict[str, object]:
     except ValueError:
         return {"account_email": account}
     return {"account_id": str(account_id)}
+
+
+def _validated_account_email(email: str) -> str:
+    """Validate a local account email before collecting a password."""
+    try:
+        return validate_account_email(email)
+    except ValueError as error:
+        _operational_failure(str(error))
+
+
+def _validated_account_selector(account: str) -> dict[str, object]:
+    """Validate an account selector locally before collecting a password."""
+    selector = _account_selector(account)
+    account_email = selector.get("account_email")
+    if account_email is not None:
+        selector["account_email"] = _validated_account_email(str(account_email))
+    return selector
 
 
 def _token_record_id(token_id: str) -> UUID:
@@ -421,6 +439,7 @@ def create_account(
 ) -> None:
     """Create an account with a prompted initial password."""
     token = _operator_token(context)
+    email = _validated_account_email(email)
     expires_at = _validated_expiry(expires_at)
     password = _prompt_password("Initial password")
     body: dict[str, object] = {"email": email, "grants": list(grants), "password": password}
@@ -482,8 +501,8 @@ def reactivate_account(context: click.Context, account: str) -> None:
 def reset_account_password(context: click.Context, account: str) -> None:
     """Reset another account's password through a hidden prompt."""
     token = _operator_token(context)
+    selector = _validated_account_selector(account)
     password = _prompt_password("New password")
-    selector = _account_selector(account)
     path = (
         f"/v1/accounts/{selector['account_id']}/password"
         if "account_id" in selector
