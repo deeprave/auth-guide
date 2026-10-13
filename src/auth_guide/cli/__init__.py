@@ -325,9 +325,18 @@ async def _serve_provider(settings: ServerSettings, ready_fd: int | None = None)
         nonlocal readiness_sent
         if ready_fd is None or readiness_sent:
             return
-        os.write(ready_fd, message)
-        os.close(ready_fd)
         readiness_sent = True
+        try:
+            os.write(ready_fd, message)
+        except OSError:
+            # The parent may have already timed out and closed its read end.
+            # Readiness remains best-effort; the detached server must continue.
+            return
+        finally:
+            try:
+                os.close(ready_fd)
+            except OSError:
+                pass
 
     async def report_ready() -> None:
         send_readiness(b"ready\n")
@@ -401,6 +410,9 @@ def start_server(context: click.Context, listen: str | None) -> None:
     """Start the HTTPS provider as a detached local process."""
     read_fd, write_fd = os.pipe()
     try:
+        # This argv is fully constructed by _server_child_arguments: it invokes
+        # only this Python interpreter with fixed options and no shell, so no
+        # external value can inject a command into the detached self-exec.
         child = subprocess.Popen(
             _server_child_arguments(context, listen, write_fd),
             stdin=subprocess.DEVNULL,
@@ -421,7 +433,6 @@ def start_server(context: click.Context, listen: str | None) -> None:
         get_logger("auth_guide").info("auth-guide server started (PID %s).", child.pid)
         return
     if outcome.startswith("error:"):
-        child.wait(timeout=5)
         _operational_failure(outcome.removeprefix("error:").strip())
     if child.poll() is not None:
         _operational_failure("auth-guide server exited before becoming ready")

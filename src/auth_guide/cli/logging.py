@@ -95,7 +95,7 @@ def configure_safe_console_logging() -> LoggerWithTrace:
 
 
 def configure_logging(configuration: CLIConfiguration, *, cli_only: bool) -> LoggerWithTrace:
-    """Configure console and optional persistent handlers for one CLI invocation."""
+    """Replace managed console and persistent handlers for one CLI invocation."""
     logger = configure_safe_console_logging()
     console = logger.handlers[0]
     console.setFormatter(_formatter(configuration.console_log_format))

@@ -99,8 +99,9 @@ The CLI SHALL require `--clear` before sending an empty complete grant set.
 ### Requirement: Separate listener and connection configuration
 The CLI SHALL resolve `{configdir}/config.toml`, overridden by `AG_CONFIG` or
 `--config`/`-C`. It SHALL resolve listen and API connection addresses separately:
-`listen` through `AG_LISTEN` or `--listen`/`-L`, and `address` through
-`AG_ADDRESS` or `--address`/`-A`. Precedence SHALL be command line,
+`listen` through `AG_LISTEN` or `--listen`/`-L` on `server start` and `server
+foreground`, and `address` through `AG_ADDRESS` or `--address`/`-A`.
+Precedence SHALL be command line,
 environment, configuration, then `https://localhost:8443`.
 
 #### Scenario: Container connection address differs from listener

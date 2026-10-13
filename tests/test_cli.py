@@ -16,12 +16,19 @@ import pytest
 from anyio import Path as AsyncPath
 from click.testing import CliRunner
 
+import auth_guide.cli as cli_module
 from auth_guide.accounts import AccountRecord, AccountStore, AccountTokenRecord, Grant, generate_account_token
 from auth_guide.cli import cli
-from auth_guide.cli.config import create_configuration_file, resolve_configuration, resolve_configuration_path
-from auth_guide.cli.logging import RedactingFormatter, configure_logging
+from auth_guide.cli.config import (
+    CLIConfiguration,
+    create_configuration_file,
+    resolve_configuration,
+    resolve_configuration_path,
+)
+from auth_guide.cli.logging import RedactingFormatter, configure_logging, configure_safe_console_logging
 from auth_guide.management_api import create_management_application, create_management_server
 from auth_guide.secrets import PlatformSecretProvider
+from auth_guide.server import ServerSettings
 from auth_guide.system_trust import select_system_trust_store
 from auth_guide.tls import LocalCertificateAuthority
 
@@ -253,6 +260,91 @@ async def test_server_start_timeout_leaves_a_live_child_untouched(tmp_path, monk
 
     assert result.exit_code == 1
     assert "Timed out waiting for auth-guide server readiness" in result.output
+
+
+@pytest.mark.anyio
+async def test_detached_child_continues_when_its_parent_has_timed_out(tmp_path, monkeypatch) -> None:
+    """A late-ready child treats its closed parent pipe as a lost notification."""
+    configuration_file = Path(tmp_path) / "config.toml"
+    await AsyncPath(configuration_file).write_text("", encoding="utf-8")
+
+    class ReadyRuntime:
+        """Report readiness without binding a provider listener."""
+
+        def __init__(self, _settings) -> None:
+            pass
+
+        async def serve(self, on_ready) -> None:
+            assert on_ready is not None
+            await on_ready()
+
+    monkeypatch.setattr(cli_module, "ProviderServerRuntime", ReadyRuntime)
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)
+    try:
+        await cli_module._serve_provider(ServerSettings(resolve_configuration(configuration_file)), write_fd)
+    finally:
+        try:
+            os.close(write_fd)
+        except OSError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_server_start_reports_child_error_without_waiting_for_cleanup(tmp_path, monkeypatch) -> None:
+    """A child-provided error remains visible even when the child is still live."""
+    configuration_file = Path(tmp_path) / "config.toml"
+    await AsyncPath(configuration_file).write_text("", encoding="utf-8")
+
+    class FailingChild:
+        """Send a safe startup failure but never complete its simulated cleanup."""
+
+        pid = 123
+
+        def __init__(self, arguments, **_kwargs) -> None:
+            readiness_fd = int(arguments[arguments.index("--ready-fd") + 1])
+            os.write(readiness_fd, b"error:Provider startup failed\n")
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> None:
+            del timeout
+            raise AssertionError("server start must not wait after an error outcome")
+
+    monkeypatch.setattr(subprocess, "Popen", FailingChild)
+
+    result = CliRunner().invoke(cli, ["--config", str(configuration_file), "server", "start"])
+
+    assert result.exit_code == 1
+    assert "Provider startup failed" in result.output
+
+
+@pytest.mark.anyio
+async def test_reconfiguring_persistent_logging_replaces_handlers(tmp_path) -> None:
+    """An in-process restart writes each log record once to its configured file."""
+    log_file = Path(tmp_path) / "provider.log"
+    configuration = CLIConfiguration(
+        configuration_file=Path(tmp_path) / "config.toml",
+        listen="https://localhost:8443",
+        address="https://localhost:8443",
+        log_level_console="INFO",
+        log_level="DEBUG",
+        log_file=str(log_file),
+        log_syslog=False,
+        cli_log=True,
+        console_log_format="%(message)s",
+        file_log_format="%(message)s",
+    )
+    try:
+        configure_logging(configuration, cli_only=False).info("before restart")
+        configure_logging(configuration, cli_only=False).info("after restart")
+        contents = await AsyncPath(log_file).read_text(encoding="utf-8")
+    finally:
+        configure_safe_console_logging()
+
+    assert contents.count("before restart") == 1
+    assert contents.count("after restart") == 1
 
 
 @pytest.mark.anyio

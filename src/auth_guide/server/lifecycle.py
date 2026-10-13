@@ -94,6 +94,8 @@ def process_is_live(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
+    except OverflowError:
+        return False
     except PermissionError:
         return True
     return True

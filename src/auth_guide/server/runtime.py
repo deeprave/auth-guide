@@ -74,12 +74,12 @@ class ProviderServerRuntime:
             while not self._shutdown_requested.is_set():
                 try:
                     await self._serve_generation(on_ready if self._generation == 0 else None)
-                except ServerRuntimeError:
+                except ServerRuntimeError as error:
                     if self._generation == 0:
                         raise
                     from auth_guide.cli.logging import get_logger
 
-                    get_logger("auth_guide").exception("Server rebuild failed")
+                    get_logger("auth_guide").error("Server rebuild failed: %s", error)
                     raise
                 if self._shutdown_requested.is_set():
                     return
@@ -87,7 +87,13 @@ class ProviderServerRuntime:
                     return
                 self._reload_requested = asyncio.Event()
                 self._reload_after_ready = False
-                self._reload_configuration()
+                try:
+                    self._reload_configuration()
+                except Exception as error:
+                    from auth_guide.cli.logging import get_logger
+
+                    get_logger("auth_guide").error("Server rebuild failed: %s", _safe_failure_reason(error))
+                    raise ServerRuntimeError("Provider server rebuild failed") from error
         finally:
             self._remove_signal_handlers()
             if claimed:
@@ -98,10 +104,10 @@ class ProviderServerRuntime:
         from auth_guide.cli.config import CLIConfiguration
         from auth_guide.cli.logging import configure_logging
 
-        configuration = self._settings.configuration
-        host, port = _listen_host_port(configuration.listen)
-        configure_logging(cast(CLIConfiguration, configuration), cli_only=False)
         try:
+            configuration = self._settings.configuration
+            host, port = _listen_host_port(configuration.listen)
+            configure_logging(cast(CLIConfiguration, configuration), cli_only=False)
             async with PlatformSecretProvider("auth-guide") as secrets:
                 async with LocalCertificateAuthority(self._settings.config_dir, secrets) as authority:
                     store = AccountStore(self._settings.config_dir, secrets)
@@ -135,10 +141,16 @@ class ProviderServerRuntime:
             AccountStoreError,
             CertificateAuthorityNotInitialisedError,
             SecretProviderError,
-            OSError,
             ValueError,
         ) as error:
             raise ServerRuntimeError(str(error)) from error
+        except ServerRuntimeError:
+            raise
+        except Exception as error:
+            from auth_guide.cli.logging import get_logger
+
+            get_logger("auth_guide").error("Provider server startup failed: %s", _safe_failure_reason(error))
+            raise ServerRuntimeError("Provider server startup failed") from error
 
     async def _wait_for_server_exit(self, server: Server, serving: asyncio.Task[None]) -> None:
         """Request Uvicorn shutdown once a lifecycle signal arrives."""
@@ -201,3 +213,10 @@ def _listen_host_port(listen: str) -> tuple[str, int]:
     if parsed.query or parsed.fragment or parsed.username or parsed.password:
         raise ServerRuntimeError("Provider listen address must be an HTTPS host and port")
     return parsed.hostname, parsed.port or 443
+
+
+def _safe_failure_reason(error: Exception) -> str:
+    """Return a useful diagnostic without reflecting paths, credentials, or configuration values."""
+    if isinstance(error, ValueError):
+        return str(error)
+    return type(error).__name__
