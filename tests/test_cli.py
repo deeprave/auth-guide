@@ -1,19 +1,22 @@
 """Behaviour tests for the administration CLI."""
 
 import asyncio
+import json
 import logging
 import os
+import signal
 import socket
-import ssl
+import subprocess
+import sys
+from pathlib import Path
 from platform import system
 
 import anyio
-import httpx
 import pytest
 from anyio import Path as AsyncPath
 from click.testing import CliRunner
 
-from auth_guide.accounts import AccountRecord, AccountStore, AccountTokenRecord, generate_account_token
+from auth_guide.accounts import AccountRecord, AccountStore, AccountTokenRecord, Grant, generate_account_token
 from auth_guide.cli import cli
 from auth_guide.cli.config import create_configuration_file, resolve_configuration, resolve_configuration_path
 from auth_guide.cli.logging import RedactingFormatter, configure_logging
@@ -208,6 +211,12 @@ async def test_unreadable_configuration_is_a_concise_console_error(tmp_path) -> 
         ["token", "create"],
         ["token", "relabel"],
         ["token", "revoke"],
+        ["server"],
+        ["server", "start"],
+        ["server", "stop"],
+        ["server", "status"],
+        ["server", "restart"],
+        ["server", "foreground"],
     ],
 )
 async def test_every_command_help_is_local(command: list[str]) -> None:
@@ -216,6 +225,61 @@ async def test_every_command_help_is_local(command: list[str]) -> None:
 
     assert result.exit_code == 0
     assert "Usage:" in result.output
+
+
+@pytest.mark.anyio
+async def test_server_start_timeout_leaves_a_live_child_untouched(tmp_path, monkeypatch) -> None:
+    """A slow detached child remains available for later status or stop operations."""
+    configuration_file = Path(tmp_path) / "config.toml"
+    await AsyncPath(configuration_file).write_text("", encoding="utf-8")
+
+    class SlowChild:
+        """Represent a child which is still starting when the parent deadline expires."""
+
+        pid = 123
+
+        def poll(self) -> None:
+            """Report that the child remains live."""
+            return None
+
+        def wait(self, timeout: float | None = None) -> None:
+            """Support the child protocol without waiting in this test."""
+            del timeout
+
+    child = SlowChild()
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: child)
+
+    result = CliRunner().invoke(cli, ["--config", str(configuration_file), "server", "start"])
+
+    assert result.exit_code == 1
+    assert "Timed out waiting for auth-guide server readiness" in result.output
+
+
+@pytest.mark.anyio
+async def test_server_restart_rejects_a_starting_runtime_without_signalling_it(tmp_path) -> None:
+    """A generation-zero runtime is allowed to finish initial startup without a restart signal."""
+    configuration_file = Path(tmp_path) / "config.toml"
+    await AsyncPath(configuration_file).write_text("", encoding="utf-8")
+    child = await anyio.open_process([sys.executable, "-c", "import time; time.sleep(30)"])
+    lifecycle_dir = AsyncPath(tmp_path)
+    try:
+        await (lifecycle_dir / "auth-guide.pid").write_text(f"{child.pid}\n", encoding="ascii")
+        await (lifecycle_dir / "auth-guide.meta.json").write_text(
+            json.dumps({"listen": "https://localhost:8443", "generation": 0}), encoding="utf-8"
+        )
+
+        result = await anyio.run_process(
+            [sys.executable, "-m", "auth_guide", "--config", str(configuration_file), "server", "restart"],
+            check=False,
+        )
+
+        assert result.returncode == 1
+        assert b"auth-guide server is still starting" in result.stderr
+        assert child.returncode is None
+    finally:
+        if child.returncode is None:
+            child.send_signal(signal.SIGTERM)
+        await child.wait()
 
 
 @pytest.mark.anyio
@@ -502,6 +566,20 @@ async def test_cli_uses_only_the_trusted_https_management_api(tmp_path, monkeypa
         async with LocalCertificateAuthority(AsyncPath(tmp_path) / "tls", secrets) as authority:
             await authority.initialise()
             store = AccountStore(AsyncPath(tmp_path) / "accounts", secrets)
+            await store.initialise()
+            administrator = AccountRecord(
+                email="admin@example.com",
+                email_comparison="admin@example.com",
+                grants=[Grant.GUIDE_ADMIN, Grant.ACCOUNTS_READ, Grant.ACCOUNTS_MANAGE, Grant.TOKENS_MANAGE],
+            )
+            await store.create_account(administrator, "a sufficiently long initial password")
+            issued_administrator = await generate_account_token()
+            await AccountTokenRecord.create(
+                account=administrator,
+                label="admin",
+                verifier=issued_administrator.verifier,
+                scopes=[Grant.ACCOUNTS_READ, Grant.ACCOUNTS_MANAGE, Grant.TOKENS_MANAGE],
+            )
             server = await create_management_server(
                 create_management_application(store), authority, host="127.0.0.1", port=port
             )
@@ -510,12 +588,8 @@ async def test_cli_uses_only_the_trusted_https_management_api(tmp_path, monkeypa
             while not server.started:
                 await asyncio.sleep(0)
             try:
-                trusted_context = ssl.create_default_context(cadata=await authority.get_root_certificate())
                 base_url = f"https://localhost:{port}"
-                async with httpx.AsyncClient(verify=trusted_context) as client:
-                    setup = await client.post(f"{base_url}/v1/setup", json={"email": "admin@example.com"})
-                assert setup.status_code == 201
-                bearer = setup.json()["token"]
+                bearer = issued_administrator.raw_value
 
                 environment = {
                     **os.environ,

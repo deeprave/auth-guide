@@ -8,7 +8,6 @@ import httpx
 import truststore
 
 DEFAULT_TIMEOUT = httpx.Timeout(5.0)
-SETUP_TIMEOUT = httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0)
 
 
 class ManagementAPIError(RuntimeError):

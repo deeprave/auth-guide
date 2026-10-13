@@ -42,9 +42,15 @@ _.add_grant
 _.remove_grant
 _.trace
 _.validate_grant_operation
+_.foreground_server
+_.server_status
+_.stop_server
+_.restart_server
+_.run_server_child
 _.management_database
 _.pytest_addoption
 _.pytest_configure
 _.pytest_collection_modifyitems
 _.pytest_unconfigure
 _.should_exit
+_.priority
