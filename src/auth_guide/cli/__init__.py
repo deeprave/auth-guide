@@ -2,7 +2,11 @@
 
 import json
 import os
+import select
+import signal
+import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
@@ -12,10 +16,12 @@ from uuid import UUID
 import anyio
 import click
 
+from auth_guide.accounts import AccountStoreError
 from auth_guide.accounts.models import validate_account_email
+from auth_guide.bootstrap import InitialProviderCredentials
+from auth_guide.bootstrap import initialise_provider as initialise_local_provider
 from auth_guide.cli.client import (
     DEFAULT_TIMEOUT,
-    SETUP_TIMEOUT,
     ManagementAPIClient,
     ManagementAPIError,
     ManagementClientConfiguration,
@@ -23,6 +29,8 @@ from auth_guide.cli.client import (
 from auth_guide.cli.config import create_configuration_file, resolve_configuration, resolve_configuration_path
 from auth_guide.cli.logging import configure_logging, configure_safe_console_logging, get_logger
 from auth_guide.secrets import PlatformSecretProvider, SecretProviderError
+from auth_guide.server import ProviderServerRuntime, ServerRuntimeError, ServerSettings
+from auth_guide.server.lifecycle import LifecycleError, paths_for, process_is_live, read_state
 from auth_guide.system_trust import TrustStoreError, select_system_trust_store
 from auth_guide.tls import (
     CertificateAuthorityAlreadyInitialisedError,
@@ -77,7 +85,6 @@ class ConfigurationGroup(click.Group):
 
 @click.group(cls=AdministrationGroup)
 @click.option("--config", "configuration_file", "-C", type=click.Path(path_type=Path), help="Configuration TOML file.")
-@click.option("--listen", "listen", "-L", help="Provider HTTPS listen address.")
 @click.option("--address", "address", "-A", help="Provider HTTPS address.")
 @click.option("--token", "prompt_token", is_flag=True, help="Prompt for the operator bearer token.")
 @click.option(
@@ -98,7 +105,6 @@ class ConfigurationGroup(click.Group):
 def cli(
     context: click.Context,
     configuration_file: Path | None,
-    listen: str | None,
     address: str | None,
     prompt_token: bool,
     log_level_console: str | None,
@@ -115,7 +121,7 @@ def cli(
     try:
         configuration = resolve_configuration(
             resolve_configuration_path(configuration_file),
-            listen=listen,
+            listen=None,
             address=address,
             log_level_console=log_level_console,
             log_level=log_level,
@@ -140,6 +146,13 @@ def cli(
     context.obj["configuration"] = configuration
     context.obj["address"] = configuration.address
     context.obj["prompt_token"] = prompt_token
+    context.obj["configuration_overrides"] = {
+        "log_level_console": log_level_console,
+        "log_level": log_level,
+        "log_file": None if log_file is None else str(log_file),
+        "log_syslog": log_syslog,
+        "cli_log": cli_log,
+    }
 
 
 def _operator_token(context: click.Context) -> str:
@@ -220,14 +233,11 @@ async def _request(
     method: str,
     path: str,
     json_body: dict[str, object] | None = None,
-    *,
-    setup: bool = False,
 ) -> object:
     """Run one prepared management request asynchronously."""
     try:
         client = ManagementAPIClient(ManagementClientConfiguration(address, token))
-        timeout = SETUP_TIMEOUT if setup else DEFAULT_TIMEOUT
-        return await client.request(method, path, json=json_body, timeout=timeout)
+        return await client.request(method, path, json=json_body, timeout=DEFAULT_TIMEOUT)
     except (ManagementAPIError, ValueError) as error:
         _operational_failure(str(error))
 
@@ -268,34 +278,256 @@ def initialise_provider(context: click.Context, email: str, remove_orphan_key: b
         _operational_failure("Initial setup cannot run while an operator token is configured")
     if not sys.stdout.isatty():
         _operational_failure("Initial setup requires a terminal stdout for generated credentials")
-    path = "/v1/setup?remove_orphan_key=true" if remove_orphan_key else "/v1/setup"
-    result = anyio.run(_request_setup, context.obj["address"], path, email)
-    if not isinstance(result, dict):
-        _operational_failure("Provider returned an invalid setup response")
-    password = result.get("password")
-    token = result.get("token")
-    if not isinstance(password, str) or not password or not isinstance(token, str) or not token:
-        _operational_failure("Provider returned an invalid setup response")
-    click.echo(f"Initial password: {password}")
-    click.echo(f"Initial token: {token}")
+    try:
+        result = anyio.run(
+            _initialise_local_provider,
+            context.obj["configuration"].configuration_file.parent,
+            email,
+            remove_orphan_key,
+        )
+    except (AccountStoreError, OSError, SecretProviderError, ValueError) as error:
+        _operational_failure(str(error))
+    click.echo(f"Initial password: {result.password}")
+    click.echo(f"Initial token: {result.token}")
 
 
-async def _request_setup(address: str, path: str, email: str) -> object:
-    """Send setup using its unbounded response wait for platform-keyring prompts."""
-    return await _request(address, None, "POST", path, {"email": email}, setup=True)
+async def _initialise_local_provider(
+    config_dir: Path, email: str, remove_orphan_key: bool
+) -> InitialProviderCredentials:
+    """Bridge Click's synchronous callback into one local bootstrap operation."""
+    return await initialise_local_provider(config_dir, email, remove_orphan_key=remove_orphan_key)
 
 
-async def _initialise_certificate_authority() -> None:
+def _server_settings(context: click.Context, listen: str | None) -> ServerSettings:
+    """Resolve server-only listener configuration at the CLI boundary."""
+    configuration = context.obj["configuration"]
+    overrides = context.obj["configuration_overrides"]
+    if listen is not None:
+        configuration = resolve_configuration(configuration.configuration_file, listen=listen, **overrides)
+    return ServerSettings(
+        configuration=configuration,
+        listen_override=listen,
+        log_level_console_override=overrides["log_level_console"],
+        log_level_override=overrides["log_level"],
+        log_file_override=overrides["log_file"],
+        log_syslog_override=overrides["log_syslog"],
+        cli_log_override=overrides["cli_log"],
+    )
+
+
+async def _serve_provider(settings: ServerSettings, ready_fd: int | None = None) -> None:
+    """Run the reusable server runtime and report child readiness once."""
+    runtime = ProviderServerRuntime(settings)
+    readiness_sent = False
+
+    def send_readiness(message: bytes) -> None:
+        """Send exactly one private child outcome to the launching parent."""
+        nonlocal readiness_sent
+        if ready_fd is None or readiness_sent:
+            return
+        readiness_sent = True
+        try:
+            os.write(ready_fd, message)
+        except OSError:
+            # The parent may have already timed out and closed its read end.
+            # Readiness remains best-effort; the detached server must continue.
+            return
+        finally:
+            try:
+                os.close(ready_fd)
+            except OSError:
+                pass
+
+    async def report_ready() -> None:
+        send_readiness(b"ready\n")
+
+    try:
+        await runtime.serve(report_ready if ready_fd is not None else None)
+    except (LifecycleError, ServerRuntimeError, OSError, ValueError) as error:
+        send_readiness(f"error:{error}\n".encode("utf-8"))
+        raise
+
+
+def _server_child_arguments(context: click.Context, listen: str | None, ready_fd: int) -> list[str]:
+    """Build the detached self-exec invocation without forwarding credentials."""
+    configuration = context.obj["configuration"]
+    arguments = [sys.executable, "-m", "auth_guide", "--config", str(configuration.configuration_file)]
+    overrides = context.obj["configuration_overrides"]
+    for option, value in (
+        ("--log-console", overrides["log_level_console"]),
+        ("--log-level", overrides["log_level"]),
+        ("--log-file", overrides["log_file"]),
+    ):
+        if value is not None:
+            arguments.extend([option, str(value)])
+    if overrides["log_syslog"] is True:
+        arguments.append("--log-syslog")
+    if overrides["cli_log"] is False:
+        arguments.append("--no-cli-log")
+    arguments.extend(["server", "_run", "--ready-fd", str(ready_fd)])
+    if listen is not None:
+        arguments.extend(["--listen", listen])
+    return arguments
+
+
+def _read_child_readiness(read_fd: int, deadline: float) -> str:
+    """Wait synchronously at the process-launch boundary for one child outcome."""
+    chunks = bytearray()
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        ready, _, _ = select.select([read_fd], [], [], max(0.0, remaining))
+        if not ready:
+            break
+        chunk = os.read(read_fd, 4096)
+        if not chunk:
+            break
+        chunks.extend(chunk)
+        if b"\n" in chunks:
+            break
+    return chunks.decode("utf-8", errors="replace").strip()
+
+
+@cli.group("server")
+def server() -> None:
+    """Run and inspect the local HTTPS provider service."""
+
+
+@server.command("foreground")
+@click.option("--listen", "listen", "-L", help="Provider HTTPS listen address.")
+@click.pass_context
+def foreground_server(context: click.Context, listen: str | None) -> None:
+    """Run the HTTPS provider attached to this terminal."""
+    try:
+        anyio.run(_serve_provider, _server_settings(context, listen))
+    except (LifecycleError, ServerRuntimeError, OSError, ValueError) as error:
+        _operational_failure(str(error))
+
+
+@server.command("start")
+@click.option("--listen", "listen", "-L", help="Provider HTTPS listen address.")
+@click.pass_context
+def start_server(context: click.Context, listen: str | None) -> None:
+    """Start the HTTPS provider as a detached local process."""
+    read_fd, write_fd = os.pipe()
+    try:
+        # This argv is fully constructed by _server_child_arguments: it invokes
+        # only this Python interpreter with fixed options and no shell, so no
+        # external value can inject a command into the detached self-exec.
+        child = subprocess.Popen(
+            _server_child_arguments(context, listen, write_fd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            pass_fds=(write_fd,),
+        )
+    except OSError as error:
+        _operational_failure(f"Unable to start auth-guide server: {error}")
+    finally:
+        os.close(write_fd)
+    try:
+        outcome = _read_child_readiness(read_fd, time.monotonic() + 30.0)
+    finally:
+        os.close(read_fd)
+    if outcome == "ready":
+        get_logger("auth_guide").info("auth-guide server started (PID %s).", child.pid)
+        return
+    if outcome.startswith("error:"):
+        _operational_failure(outcome.removeprefix("error:").strip())
+    if child.poll() is not None:
+        _operational_failure("auth-guide server exited before becoming ready")
+    _operational_failure("Timed out waiting for auth-guide server readiness")
+
+
+@server.command("status")
+@click.pass_context
+def server_status(context: click.Context) -> None:
+    """Write structured local server lifecycle status."""
+    try:
+        state = anyio.run(read_state, paths_for(context.obj["configuration"].configuration_file.parent))
+    except (LifecycleError, OSError, ValueError) as error:
+        _operational_failure(str(error))
+    click.echo(state.as_json())
+    if state.state != "running":
+        raise click.exceptions.Exit(3)
+
+
+def _signal_running_server(context: click.Context, signal_number: signal.Signals) -> int:
+    """Read and signal a live runtime without modifying lifecycle state."""
+    state = anyio.run(read_state, paths_for(context.obj["configuration"].configuration_file.parent))
+    if state.state == "stopped":
+        _operational_failure("auth-guide server is not running")
+    if state.state == "stale" or state.pid is None or not process_is_live(state.pid):
+        _operational_failure("auth-guide server lifecycle state is stale")
+    os.kill(state.pid, signal_number)
+    return state.pid
+
+
+@server.command("stop")
+@click.pass_context
+def stop_server(context: click.Context) -> None:
+    """Request graceful shutdown of the running local provider."""
+    try:
+        pid = _signal_running_server(context, signal.SIGTERM)
+    except (LifecycleError, OSError, ValueError) as error:
+        _operational_failure(str(error))
+    deadline = time.monotonic() + 30.0
+    while process_is_live(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if process_is_live(pid):
+        _operational_failure("Timed out waiting for auth-guide server shutdown")
+    get_logger("auth_guide").info("auth-guide server stopped.")
+
+
+@server.command("restart")
+@click.pass_context
+def restart_server(context: click.Context) -> None:
+    """Request an in-process rebuild of the running local provider."""
+    try:
+        lifecycle_paths = paths_for(context.obj["configuration"].configuration_file.parent)
+        state = anyio.run(read_state, lifecycle_paths)
+        if state.state == "starting" or state.generation == 0:
+            _operational_failure("auth-guide server is still starting")
+        previous_generation = state.generation or 0
+        target_generation = previous_generation + 1
+        _signal_running_server(context, signal.SIGHUP)
+    except (LifecycleError, OSError, ValueError) as error:
+        _operational_failure(str(error))
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        current = anyio.run(read_state, lifecycle_paths)
+        if current.state == "running" and current.generation is not None and current.generation >= target_generation:
+            get_logger("auth_guide").info("auth-guide server restarted.")
+            return
+        if current.state in {"stale", "stopped"}:
+            _operational_failure("auth-guide server restart failed")
+        time.sleep(0.05)
+    _operational_failure("Timed out waiting for auth-guide server restart")
+
+
+@server.command("_run", hidden=True)
+@click.option("--listen", "listen", "-L", help="Provider HTTPS listen address.")
+@click.option("--ready-fd", type=int, required=True)
+@click.pass_context
+def run_server_child(context: click.Context, listen: str | None, ready_fd: int) -> None:
+    """Run one detached provider child for the private start protocol."""
+    try:
+        anyio.run(_serve_provider, _server_settings(context, listen), ready_fd)
+    except (LifecycleError, ServerRuntimeError, OSError, ValueError):
+        raise click.exceptions.Exit(1) from None
+
+
+async def _initialise_certificate_authority(config_dir: Path) -> None:
     """Create the provider-local authority through its owned secret boundary."""
     async with PlatformSecretProvider("auth-guide") as secrets:
-        async with LocalCertificateAuthority(secrets=secrets) as authority:
+        async with LocalCertificateAuthority(config_dir, secrets) as authority:
             await authority.initialise()
 
 
-async def _change_system_trust(remove: bool) -> None:
+async def _change_system_trust(config_dir: Path, remove: bool) -> None:
     """Install or remove the current public CA through the selected platform facade."""
     async with PlatformSecretProvider("auth-guide") as secrets:
-        async with LocalCertificateAuthority(secrets=secrets) as authority:
+        async with LocalCertificateAuthority(config_dir, secrets) as authority:
             trust_store = await select_system_trust_store()
             if remove:
                 await authority.remove_system_trust(trust_store)
@@ -309,10 +541,11 @@ def certificate_authority() -> None:
 
 
 @certificate_authority.command("init")
-def initialise_certificate_authority() -> None:
+@click.pass_context
+def initialise_certificate_authority(context: click.Context) -> None:
     """Create the local CA and its default localhost certificate."""
     try:
-        anyio.run(_initialise_certificate_authority)
+        anyio.run(_initialise_certificate_authority, context.obj["configuration"].configuration_file.parent)
     except (
         CertificateAuthorityAlreadyInitialisedError,
         OSError,
@@ -330,10 +563,11 @@ def certificate_trust() -> None:
 
 
 @certificate_trust.command("install")
-def install_certificate_trust() -> None:
+@click.pass_context
+def install_certificate_trust(context: click.Context) -> None:
     """Install the current local CA in the supported system trust store."""
     try:
-        anyio.run(_change_system_trust, False)
+        anyio.run(_change_system_trust, context.obj["configuration"].configuration_file.parent, False)
     except (
         CertificateAuthorityNotInitialisedError,
         OSError,
@@ -347,10 +581,11 @@ def install_certificate_trust() -> None:
 
 
 @certificate_trust.command("remove")
-def remove_certificate_trust() -> None:
+@click.pass_context
+def remove_certificate_trust(context: click.Context) -> None:
     """Remove the current local CA from the supported system trust store."""
     try:
-        anyio.run(_change_system_trust, True)
+        anyio.run(_change_system_trust, context.obj["configuration"].configuration_file.parent, True)
     except (
         CertificateAuthorityNotInitialisedError,
         OSError,

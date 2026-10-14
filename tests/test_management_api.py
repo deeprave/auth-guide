@@ -3,7 +3,6 @@
 import asyncio
 import socket
 import ssl
-from base64 import b64encode
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import cast
@@ -14,10 +13,7 @@ import pytest
 from anyio import Path as AsyncPath
 from tortoise import Tortoise
 
-import auth_guide.accounts as accounts_module
 from auth_guide.accounts import (
-    DATABASE_FILENAME,
-    DATABASE_KEY_REFERENCE,
     AccountRecord,
     AccountStore,
     AccountStoreError,
@@ -25,9 +21,8 @@ from auth_guide.accounts import (
     Grant,
     generate_account_token,
 )
-from auth_guide.accounts.passwords import PasswordOperations
 from auth_guide.management_api import create_management_application, create_management_server
-from auth_guide.secrets import MissingSecretError, PlatformSecretProvider, SecretReference
+from auth_guide.secrets import PlatformSecretProvider
 from auth_guide.tls import LocalCertificateAuthority
 
 TEST_PASSWORD_HASH = "$argon2id$v=19$m=65536,t=3,p=4$MDEyMzQ1Njc4OWFiY2RlZg$PjSoTrIgSEYn0GfJ1m5dwCJmQtOaMjFFTIwHP6GJwrs"
@@ -62,7 +57,6 @@ class BootstrapStore:
 
     def __init__(self, failure_stage: str | None = None) -> None:
         self.failure_stage = failure_stage
-        self.rollback_calls = 0
         self.initialised = False
 
     async def initialise(self) -> None:
@@ -95,7 +89,6 @@ class BootstrapStore:
 
     async def rollback_initialisation(self) -> None:
         """Represent removal of state created during this request only."""
-        self.rollback_calls += 1
         self.initialised = False
         await AccountTokenRecord.all().delete()
         await AccountRecord.including_inactive().delete()
@@ -143,11 +136,7 @@ async def test_management_application_publishes_openapi_without_interactive_docu
     assert openapi_response.status_code == 200
     assert openapi_response.json()["openapi"]
     assert "/v1/authenticate" in openapi_response.json()["paths"]
-    assert "/v1/setup" in openapi_response.json()["paths"]
-    setup_parameters = openapi_response.json()["paths"]["/v1/setup"]["post"]["parameters"]
-    assert {parameter["name"] for parameter in setup_parameters} == {"remove_orphan_key"}
-    assert setup_parameters[0]["in"] == "query"
-    assert setup_parameters[0]["schema"]["default"] is False
+    assert "/v1/setup" not in openapi_response.json()["paths"]
     assert "/v1/accounts" in openapi_response.json()["paths"]
     assert "/v1/tokens" in openapi_response.json()["paths"]
     assert swagger_response.status_code == 404
@@ -165,6 +154,20 @@ async def test_management_server_serves_only_trusted_https(tmp_path) -> None:
         async with LocalCertificateAuthority(AsyncPath(tmp_path) / "tls", secrets) as authority:
             await authority.initialise()
             store = AccountStore(AsyncPath(tmp_path) / "accounts", secrets)
+            await store.initialise()
+            admin = AccountRecord(
+                email="admin@example.com",
+                email_comparison="admin@example.com",
+                grants=[Grant.GUIDE_ADMIN, Grant.ACCOUNTS_READ, Grant.ACCOUNTS_MANAGE, Grant.TOKENS_MANAGE],
+            )
+            await store.create_account(admin, "initial password")
+            issued = await generate_account_token()
+            await AccountTokenRecord.create(
+                account=admin,
+                label="admin",
+                verifier=issued.verifier,
+                scopes=[Grant.ACCOUNTS_READ, Grant.ACCOUNTS_MANAGE, Grant.TOKENS_MANAGE],
+            )
             server = await create_management_server(
                 create_management_application(store), authority, host="127.0.0.1", port=port
             )
@@ -176,8 +179,7 @@ async def test_management_server_serves_only_trusted_https(tmp_path) -> None:
                 async with httpx.AsyncClient(verify=trusted_context) as client:
                     base_url = f"https://localhost:{port}"
                     openapi = await client.get(f"{base_url}/openapi.json")
-                    setup = await client.post(f"{base_url}/v1/setup", json={"email": "admin@example.com"})
-                    bearer = setup.json()["token"]
+                    bearer = issued.raw_value
                     headers = {"Authorization": f"Bearer {bearer}"}
 
                     authenticated = await client.post(f"{base_url}/v1/authenticate", headers=headers)
@@ -236,7 +238,6 @@ async def test_management_server_serves_only_trusted_https(tmp_path) -> None:
                     rejected = await client.post(f"{base_url}/v1/authenticate", headers=headers)
 
                 assert openapi.status_code == 200
-                assert setup.status_code == 201
                 assert authenticated.status_code == 200
                 assert own_account.status_code == 200
                 assert own_update.status_code == 200
@@ -340,18 +341,18 @@ async def test_token_without_management_scope_cannot_create_an_account(managemen
 
 
 @pytest.mark.anyio
-async def test_management_routes_reject_client_database_configuration(management_database) -> None:
-    """Clients cannot smuggle database paths or credentials through API input."""
+async def test_management_api_does_not_expose_remote_setup(management_database) -> None:
+    """Initialisation is intentionally unavailable through the HTTPS API."""
     application = create_management_application()
     transport = httpx.ASGITransport(app=application)
 
     async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
         response = await client.post(
             "/v1/setup",
-            json={"email": "admin@example.com", "database_path": "/tmp/client.sqlite3"},
+            json={"email": "admin@example.com"},
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 404
 
 
 @pytest.mark.anyio
@@ -775,243 +776,3 @@ async def test_token_creation_distinguishes_missing_and_inactive_uuid_targets(ma
     assert missing.json()["detail"] == "Account does not exist"
     assert inactive_response.status_code == 404
     assert inactive_response.json()["detail"] == "Active account does not exist"
-
-
-@pytest.mark.anyio
-async def test_setup_requires_an_explicit_account_store_runtime() -> None:
-    """The unauthenticated setup route cannot create state without its runtime."""
-    application = create_management_application()
-    transport = httpx.ASGITransport(app=application)
-
-    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-        response = await client.post("/v1/setup", json={"email": "admin@example.com"})
-
-    assert response.status_code == 503
-
-
-@pytest.mark.anyio
-async def test_setup_creates_the_initial_account_and_returns_credentials_once(management_database) -> None:
-    """Setup returns its generated password/token but persists only their safe state."""
-    store = BootstrapStore()
-    application = create_management_application(cast(AccountStore, store))
-    transport = httpx.ASGITransport(app=application)
-
-    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-        response = await client.post("/v1/setup", json={"email": "admin@example.com"})
-
-    assert response.status_code == 201
-    result = response.json()
-    assert len(result["password"]) == 12
-    assert result["token"].startswith("agt_")
-    assert result["account"]["must_change_password"] is True
-    assert await AccountRecord.all().count() == 1
-    assert await AccountTokenRecord.all().count() == 1
-    assert store.rollback_calls == 0
-
-
-@pytest.mark.anyio
-async def test_setup_runs_the_real_account_store_initialisation_and_native_migration(tmp_path) -> None:
-    """Bootstrap creates the encrypted store through its actual native migration lifecycle."""
-    keyring = MemoryKeyring()
-    async with PlatformSecretProvider("real-bootstrap-test", keyring) as secrets:
-        store = AccountStore(tmp_path, secrets)
-        application = create_management_application(store)
-        transport = httpx.ASGITransport(app=application)
-        try:
-            async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-                response = await client.post("/v1/setup", json={"email": "admin@example.com"})
-
-            assert response.status_code == 201
-            assert await (AsyncPath(tmp_path) / DATABASE_FILENAME).exists()
-            assert await secrets.resolve(SecretReference("auth-guide-database-key"))
-            account = await AccountRecord.get(email="admin@example.com")
-            assert account.must_change_password
-            assert await AccountTokenRecord.all().count() == 1
-        finally:
-            await store.aclose()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("database_exists", "key_exists", "remove_orphan_key", "expected_status"),
-    [
-        (False, True, False, 409),
-        (False, True, True, 201),
-        (True, True, True, 409),
-        (True, False, True, 409),
-        (False, False, True, 409),
-    ],
-)
-async def test_setup_recovers_only_an_explicit_orphaned_database_key(
-    tmp_path,
-    database_exists: bool,
-    key_exists: bool,
-    remove_orphan_key: bool,
-    expected_status: int,
-) -> None:
-    """Setup removes a key only for the explicitly selected orphaned-key state."""
-    database_path = AsyncPath(tmp_path) / DATABASE_FILENAME
-    orphaned_key = "orphaned-database-key"
-    if database_exists:
-        await database_path.write_bytes(b"pre-existing database")
-
-    async with PlatformSecretProvider("orphan-key-recovery-test", MemoryKeyring()) as secrets:
-        if key_exists:
-            await secrets.store(DATABASE_KEY_REFERENCE, orphaned_key)
-        store = AccountStore(tmp_path, secrets)
-        application = create_management_application(store)
-        transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
-        try:
-            query = "?remove_orphan_key=true" if remove_orphan_key else ""
-            async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-                response = await client.post(f"/v1/setup{query}", json={"email": "admin@example.com"})
-
-            assert response.status_code == expected_status
-            assert orphaned_key not in response.text
-            if expected_status == 201:
-                assert await database_path.exists()
-                assert await secrets.resolve(DATABASE_KEY_REFERENCE) != orphaned_key
-            else:
-                assert await database_path.exists() is database_exists
-                if key_exists:
-                    assert await secrets.resolve(DATABASE_KEY_REFERENCE) == orphaned_key
-                else:
-                    with pytest.raises(MissingSecretError):
-                        await secrets.resolve(DATABASE_KEY_REFERENCE)
-        finally:
-            await store.aclose()
-
-
-@pytest.mark.anyio
-async def test_setup_recovers_an_orphaned_key_after_store_readiness_start(tmp_path) -> None:
-    """Explicit recovery reuses a store started for no-database readiness."""
-    orphaned_key = b64encode(b"x" * 32).decode("ascii")
-    async with PlatformSecretProvider("orphan-key-readiness-test", MemoryKeyring()) as secrets:
-        await secrets.store(DATABASE_KEY_REFERENCE, orphaned_key)
-        store = AccountStore(tmp_path, secrets)
-        await store.start()
-        application = create_management_application(store)
-        transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
-        try:
-            async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-                response = await client.post("/v1/setup?remove_orphan_key=true", json={"email": "admin@example.com"})
-
-            assert response.status_code == 201
-            assert await (AsyncPath(tmp_path) / DATABASE_FILENAME).exists()
-            assert await secrets.resolve(DATABASE_KEY_REFERENCE) != orphaned_key
-        finally:
-            await store.aclose()
-
-
-@pytest.mark.anyio
-async def test_real_setup_removes_partial_state_when_key_creation_fails(tmp_path) -> None:
-    """A failed platform-key write leaves no database or usable database key."""
-    async with PlatformSecretProvider("real-bootstrap-test", FailingKeyring()) as secrets:
-        store = AccountStore(tmp_path, secrets)
-        application = create_management_application(store)
-        transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
-        try:
-            async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-                response = await client.post("/v1/setup", json={"email": "admin@example.com"})
-
-            assert response.status_code == 500
-            assert not await (AsyncPath(tmp_path) / DATABASE_FILENAME).exists()
-            with pytest.raises(MissingSecretError):
-                await secrets.resolve(DATABASE_KEY_REFERENCE)
-        finally:
-            await store.aclose()
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("failure_stage", ["migration", "account", "password", "token"])
-async def test_real_setup_rolls_back_each_post_key_failure_stage(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
-) -> None:
-    """Failures after creating the key remove both actual encrypted-store resources."""
-
-    async def fail(*_: object, **__: object) -> None:
-        raise RuntimeError(f"{failure_stage} failed")
-
-    if failure_stage == "migration":
-        monkeypatch.setattr(accounts_module, "migrate", fail)
-    elif failure_stage == "account":
-        monkeypatch.setattr(AccountRecord, "save", fail)
-    elif failure_stage == "password":
-        monkeypatch.setattr(PasswordOperations, "hash", fail)
-    else:
-        monkeypatch.setattr(AccountTokenRecord, "create", fail)
-
-    keyring = MemoryKeyring()
-    async with PlatformSecretProvider("real-bootstrap-test", keyring) as secrets:
-        store = AccountStore(tmp_path, secrets)
-        application = create_management_application(store)
-        transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
-        try:
-            async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-                response = await client.post("/v1/setup", json={"email": "admin@example.com"})
-
-            assert response.status_code == 500
-            assert not await (AsyncPath(tmp_path) / DATABASE_FILENAME).exists()
-            with pytest.raises(MissingSecretError):
-                await secrets.resolve(DATABASE_KEY_REFERENCE)
-        finally:
-            await store.aclose()
-
-
-@pytest.mark.anyio
-async def test_concurrent_setup_requests_leave_one_initial_administrator(management_database) -> None:
-    """Competing setup requests cannot each create an initial administrator."""
-    store = BootstrapStore()
-    application = create_management_application(cast(AccountStore, store))
-    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
-
-    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-        first, second = await asyncio.gather(
-            client.post("/v1/setup", json={"email": "admin@example.com"}),
-            client.post("/v1/setup", json={"email": "admin@example.com"}),
-        )
-
-    assert sorted((first.status_code, second.status_code)) == [201, 409]
-    assert await AccountRecord.all().count() == 1
-    assert await AccountTokenRecord.all().count() == 1
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("failure_stage", ["initialise", "password"])
-async def test_setup_failure_does_not_leave_account_or_token_state(management_database, failure_stage: str) -> None:
-    """A setup failure either creates nothing or rolls back request-created state."""
-    store = BootstrapStore(failure_stage)
-    application = create_management_application(cast(AccountStore, store))
-    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
-
-    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-        response = await client.post("/v1/setup", json={"email": "admin@example.com"})
-
-    assert response.status_code in {409, 500}
-    assert await AccountRecord.all().count() == 0
-    assert await AccountTokenRecord.all().count() == 0
-    assert store.rollback_calls == (0 if failure_stage == "initialise" else 1)
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("failed_model", [AccountRecord, AccountTokenRecord])
-async def test_setup_rolls_back_when_account_or_token_persistence_fails(
-    management_database, monkeypatch: pytest.MonkeyPatch, failed_model: type[AccountRecord] | type[AccountTokenRecord]
-) -> None:
-    """Model persistence failures after initialisation remove request-created state."""
-    store = BootstrapStore()
-
-    async def fail_persistence(*_: object, **__: object) -> None:
-        raise RuntimeError("persistence failed")
-
-    monkeypatch.setattr(failed_model, "create" if failed_model is AccountTokenRecord else "save", fail_persistence)
-    application = create_management_application(cast(AccountStore, store))
-    transport = httpx.ASGITransport(app=application, raise_app_exceptions=False)
-
-    async with httpx.AsyncClient(transport=transport, base_url="https://auth-guide.test") as client:
-        response = await client.post("/v1/setup", json={"email": "admin@example.com"})
-
-    assert response.status_code == 500
-    assert await AccountRecord.all().count() == 0
-    assert await AccountTokenRecord.all().count() == 0
-    assert store.rollback_calls == 1

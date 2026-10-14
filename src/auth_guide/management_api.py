@@ -1,7 +1,5 @@
 """HTTPS-only management API application factory."""
 
-import asyncio
-import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Self
@@ -17,7 +15,6 @@ from uvicorn import Config, Server
 from auth_guide.accounts import (
     AccountRecord,
     AccountStore,
-    AccountStoreError,
     AccountTokenRecord,
     Grant,
     generate_account_token,
@@ -71,20 +68,6 @@ class TokenCreationRequest(RequestModel):
 class TokenCreationResponse(TokenResponse):
     """A newly issued token, including its once-only raw bearer value."""
 
-    token: str
-
-
-class SetupRequest(RequestModel):
-    """The first administrator identity accepted during initial setup."""
-
-    email: str
-
-
-class SetupResponse(BaseModel):
-    """Once-only credentials returned from a successful initial setup."""
-
-    account: AccountResponse
-    password: str
     token: str
 
 
@@ -169,12 +152,6 @@ class AuthenticatedPrincipal:
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-async def generate_initial_password() -> str:
-    """Generate the required 12-character printable-ASCII bootstrap password."""
-    printable_ascii = "".join(chr(value) for value in range(33, 127))
-    return "".join(secrets.choice(printable_ascii) for _ in range(12))
-
-
 def token_response(token: AccountTokenRecord) -> TokenResponse:
     """Return the non-secret token representation for an eager-loaded token."""
     return TokenResponse(
@@ -194,7 +171,6 @@ def create_management_application(account_store: AccountStore | None = None) -> 
         docs_url=None,
         redoc_url=None,
     )
-    setup_lock = asyncio.Lock()
 
     async def require_principal(
         credentials: Annotated[HTTPAuthorizationCredentials | None, Security(bearer_scheme)],
@@ -238,56 +214,6 @@ def create_management_application(account_store: AccountStore | None = None) -> 
     ) -> AuthenticatedPrincipal:
         """Require account-management authority for a privileged mutation."""
         return await require_account_grant(Grant.ACCOUNTS_MANAGE, principal)
-
-    async def perform_setup(request: SetupRequest, *, remove_orphan_key: bool) -> SetupResponse:
-        """Create the first administrator only through a fresh account store."""
-        store = await require_store()
-        try:
-            email_values = await normalise_account_email(request.email)
-        except ValueError as error:
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(error)) from error
-        initialised = False
-        try:
-            if remove_orphan_key:
-                await store.remove_orphan_database_key()
-            await store.initialise()
-            initialised = True
-            password = await generate_initial_password()
-            account = AccountRecord(
-                email=email_values["email"],
-                email_comparison=email_values["email_comparison"],
-                grants=[Grant.GUIDE_ADMIN, Grant.ACCOUNTS_READ, Grant.ACCOUNTS_MANAGE, Grant.TOKENS_MANAGE],
-            )
-            await store.create_account(account, password)
-            issued_token = await generate_account_token()
-            await AccountTokenRecord.create(
-                account=account,
-                label="admin",
-                verifier=issued_token.verifier,
-                scopes=[Grant.ACCOUNTS_READ, Grant.ACCOUNTS_MANAGE, Grant.TOKENS_MANAGE],
-            )
-        except AccountStoreError as error:
-            if initialised:
-                await store.rollback_initialisation()
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
-        except BaseException:
-            if initialised:
-                await store.rollback_initialisation()
-            raise
-        return SetupResponse(
-            account=AccountResponse.model_validate(account),
-            password=password,
-            token=issued_token.raw_value,
-        )
-
-    @application.post("/v1/setup", response_model=SetupResponse, status_code=status.HTTP_201_CREATED)
-    async def setup_first_administrator(
-        request: SetupRequest,
-        remove_orphan_key: Annotated[bool, Query()] = False,
-    ) -> SetupResponse:
-        """Serialise competing initial setup requests within this API process."""
-        async with setup_lock:
-            return await perform_setup(request, remove_orphan_key=remove_orphan_key)
 
     @application.post("/v1/authenticate", response_model=GuideAuthenticationResponse)
     async def authenticate_for_guide(
@@ -639,6 +565,7 @@ async def create_management_server(
     *,
     host: str,
     port: int,
+    install_signal_handlers: bool = True,
 ) -> Server:
     """Create an HTTPS-only Uvicorn server using the active provider leaf."""
     context = await authority.get_active_server_ssl_context()
@@ -647,5 +574,14 @@ async def create_management_server(
         host=host,
         port=port,
         ssl_context_factory=lambda _configuration, _default_factory: context,
+        access_log=False,
     )
-    return Server(configuration)
+    server_type = Server if install_signal_handlers else _LifecycleManagedServer
+    return server_type(configuration)
+
+
+class _LifecycleManagedServer(Server):
+    """Leave process signals to the provider lifecycle owner."""
+
+    def install_signal_handlers(self) -> None:
+        """Avoid replacing the server runtime's SIGTERM/SIGINT/SIGHUP handlers."""

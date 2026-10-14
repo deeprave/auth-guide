@@ -8,14 +8,21 @@ without manually managing a Uvicorn process.
 
 ## What Changes
 
-- Add a CLI-owned local provider-service lifecycle using the normal background
-  process and PID-file protocol.
+- Add a server-owned local provider-service lifecycle using a detached
+  self-executing child process and PID-file protocol, including in-process
+  SIGHUP restart.
+- Expose that lifecycle as `auth-guide server start`, `stop`, `status`,
+  `restart`, and `foreground`, keeping server-only listener configuration out
+  of unrelated administration commands.
 - Start the service with its existing TLS, account-store, and configuration
-  boundaries; stop only the process owned by the configured PID file.
+  boundaries; have the server runtime own PID-file creation and cleanup.
 - Provide status and foreground operation suitable for development and service
   supervision.
-- Prevent duplicate starts, stale PID-file confusion, and accidental signalling
-  of an unrelated process.
+- Let the server runtime serialise lifecycle-file updates, prevent duplicate
+  starts, and clean up stale PID files.
+- Record the effective listener address in server-owned JSON metadata beside the
+  conventional PID file. Multiple named instances are deferred to a later
+  change.
 
 ## Capabilities
 
@@ -28,6 +35,7 @@ without manually managing a Uvicorn process.
 
 ## Impact
 
-Adds CLI process-management code and tests, and consumes existing local TLS,
+Adds `src/auth_guide/server/` runtime and process-management code plus CLI
+adapters and tests, and consumes existing local TLS,
 encrypted-account-store, and management-API library boundaries. It does not
 change management API routes or permit direct database access.
