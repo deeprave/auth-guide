@@ -6,6 +6,7 @@ import asyncio
 import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from typing import Protocol, cast
 from urllib.parse import urlsplit
@@ -17,6 +18,8 @@ from auth_guide.management_api import create_management_application, create_mana
 from auth_guide.secrets import PlatformSecretProvider, SecretProviderError
 from auth_guide.server.lifecycle import begin_runtime, end_runtime, mark_ready, paths_for
 from auth_guide.tls import CertificateAuthorityNotInitialisedError, LocalCertificateAuthority
+
+_PACKAGE_NAME = "auth-guide"
 
 
 class ServerRuntimeError(RuntimeError):
@@ -56,8 +59,9 @@ class ServerSettings:
 class ProviderServerRuntime:
     """Own one provider HTTPS runtime and its lifecycle files."""
 
-    def __init__(self, settings: ServerSettings) -> None:
+    def __init__(self, settings: ServerSettings, *, foreground: bool = True) -> None:
         self._settings = settings
+        self._foreground = foreground
         self._paths = paths_for(settings.config_dir)
         self._generation = 0
         self._shutdown_requested = asyncio.Event()
@@ -97,6 +101,10 @@ class ProviderServerRuntime:
         finally:
             self._remove_signal_handlers()
             if claimed:
+                if self._generation > 0:
+                    from auth_guide.cli.logging import get_logger
+
+                    get_logger("auth_guide").info("auth-guide %s has shut down.", version(_PACKAGE_NAME))
                 await end_runtime(self._paths)
 
     async def _serve_generation(self, on_ready: Callable[[], Awaitable[None]] | None) -> None:
@@ -107,7 +115,11 @@ class ProviderServerRuntime:
         try:
             configuration = self._settings.configuration
             host, port = _listen_host_port(configuration.listen)
-            configure_logging(cast(CLIConfiguration, configuration), cli_only=False)
+            logger = configure_logging(
+                cast(CLIConfiguration, configuration), cli_only=False, foreground=self._foreground
+            )
+            if self._generation == 0:
+                logger.info("Starting auth-guide %s.", version(_PACKAGE_NAME))
             async with PlatformSecretProvider("auth-guide") as secrets:
                 async with LocalCertificateAuthority(self._settings.config_dir, secrets) as authority:
                     store = AccountStore(self._settings.config_dir, secrets)

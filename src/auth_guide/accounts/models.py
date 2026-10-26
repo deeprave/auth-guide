@@ -74,7 +74,7 @@ class AccountRecord(Model):
     full_name = fields.TextField(null=True)
     must_change_password = fields.BooleanField(default=False)
 
-    class Meta:
+    class Meta:  # ty: ignore[invalid-attribute-override]
         table = "accounts"
         manager = ActiveAccountManager()
 
@@ -130,7 +130,7 @@ class AccountTokenRecord(Model):
     scopes = fields.JSONField()
     created_at = fields.DatetimeField(auto_now_add=True)
 
-    class Meta:
+    class Meta:  # ty: ignore[invalid-attribute-override]
         table = "account_tokens"
 
     async def save(

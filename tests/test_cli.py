@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
 from platform import system
 
@@ -15,8 +16,10 @@ import anyio
 import pytest
 from anyio import Path as AsyncPath
 from click.testing import CliRunner
+from rich.console import Console as RichConsole
 
 import auth_guide.cli as cli_module
+import auth_guide.cli.logging as logging_module
 from auth_guide.accounts import AccountRecord, AccountStore, AccountTokenRecord, Grant, generate_account_token
 from auth_guide.cli import cli
 from auth_guide.cli.config import (
@@ -25,7 +28,12 @@ from auth_guide.cli.config import (
     resolve_configuration,
     resolve_configuration_path,
 )
-from auth_guide.cli.logging import RedactingFormatter, configure_logging, configure_safe_console_logging
+from auth_guide.cli.logging import (
+    RedactingFormatter,
+    configure_logging,
+    configure_safe_console_logging,
+    sanitise_access_target,
+)
 from auth_guide.management_api import create_management_application, create_management_server
 from auth_guide.secrets import PlatformSecretProvider
 from auth_guide.server import ServerSettings
@@ -50,6 +58,27 @@ class MemoryKeyring:
     def delete_password(self, service_name: str, username: str) -> None:
         """Remove one provider secret."""
         del self.values[(service_name, username)]
+
+
+@pytest.fixture
+def provider_logging_configuration(tmp_path):
+    """Create one isolated provider logging configuration for a behaviour test."""
+
+    def build(*, log_file: Path | None = None) -> CLIConfiguration:
+        return CLIConfiguration(
+            configuration_file=Path(tmp_path) / "config.toml",
+            listen="https://localhost:8443",
+            address="https://localhost:8443",
+            log_level_console="INFO",
+            log_level="DEBUG",
+            log_file=str(log_file) if log_file is not None else None,
+            log_syslog=False,
+            cli_log=True,
+            console_log_format="%(message)s",
+            file_log_format="%(message)s",
+        )
+
+    return build
 
 
 @pytest.mark.anyio
@@ -271,8 +300,8 @@ async def test_detached_child_continues_when_its_parent_has_timed_out(tmp_path, 
     class ReadyRuntime:
         """Report readiness without binding a provider listener."""
 
-        def __init__(self, _settings) -> None:
-            pass
+        def __init__(self, _settings, *, foreground: bool) -> None:
+            del foreground
 
         async def serve(self, on_ready) -> None:
             assert on_ready is not None
@@ -321,30 +350,126 @@ async def test_server_start_reports_child_error_without_waiting_for_cleanup(tmp_
 
 
 @pytest.mark.anyio
-async def test_reconfiguring_persistent_logging_replaces_handlers(tmp_path) -> None:
+async def test_reconfiguring_persistent_logging_replaces_handlers(tmp_path, provider_logging_configuration) -> None:
     """An in-process restart writes each log record once to its configured file."""
     log_file = Path(tmp_path) / "provider.log"
-    configuration = CLIConfiguration(
-        configuration_file=Path(tmp_path) / "config.toml",
-        listen="https://localhost:8443",
-        address="https://localhost:8443",
-        log_level_console="INFO",
-        log_level="DEBUG",
-        log_file=str(log_file),
-        log_syslog=False,
-        cli_log=True,
-        console_log_format="%(message)s",
-        file_log_format="%(message)s",
-    )
+    configuration = provider_logging_configuration(log_file=log_file)
     try:
         configure_logging(configuration, cli_only=False).info("before restart")
+        logging.getLogger("uvicorn.error").info("before restart server operation")
         configure_logging(configuration, cli_only=False).info("after restart")
+        logging.getLogger("uvicorn.error").info("after restart server operation")
         contents = await AsyncPath(log_file).read_text(encoding="utf-8")
     finally:
         configure_safe_console_logging()
 
-    assert contents.count("before restart") == 1
-    assert contents.count("after restart") == 1
+    assert contents.splitlines().count("before restart") == 1
+    assert contents.splitlines().count("after restart") == 1
+    assert contents.splitlines().count("before restart server operation") == 1
+    assert contents.splitlines().count("after restart server operation") == 1
+
+
+@pytest.mark.parametrize(
+    ("target", "expected"),
+    [
+        (
+            "/v1/accounts?email=john.smith%40hobnobs.com",
+            "/v1/accounts?email=j***h@h***s.com",
+        ),
+        (
+            "/v1/accounts?email=john%40hobnobs.com%0Aforged",
+            "/v1/accounts?email=[invalid]",
+        ),
+        (
+            "/v1/accounts?account_id=123e4567e89b12d3a456426614174000",
+            "/v1/accounts?account_id=123e****************************4000",
+        ),
+        (
+            "/v1/accounts/123e4567e89b12d3a456426614174000",
+            "/v1/accounts/123e****************************4000",
+        ),
+        (
+            "/v1/accounts?account_id=not-a-uuid",
+            "/v1/accounts?account_id=[invalid]",
+        ),
+    ],
+)
+def test_sanitise_access_target_marks_invalid_selectors(target: str, expected: str) -> None:
+    """Selector masking retains valid structure and rejects invalid input."""
+    assert sanitise_access_target(target) == expected
+
+
+@pytest.mark.anyio
+async def test_uvicorn_access_records_use_provider_handlers_and_mask_selectors(
+    tmp_path, monkeypatch, provider_logging_configuration
+) -> None:
+    """Provider-owned access logging preserves target shape without leaking selectors."""
+    log_file = Path(tmp_path) / "provider.log"
+    console_output = StringIO()
+    monkeypatch.setattr(
+        logging_module,
+        "Console",
+        lambda **_kwargs: RichConsole(file=console_output, force_terminal=False, color_system=None, width=300),
+    )
+    configuration = provider_logging_configuration(log_file=log_file)
+    account_id = "123e4567-e89b-12d3-a456-426614174000"
+    email = "john.smith@hobnobs.com"
+    target = f"/v1/accounts/{account_id}?email={email}&account_id={account_id}&page=1"
+    try:
+        configure_logging(configuration, cli_only=False, foreground=True)
+        logging.getLogger("auth_guide").info("Provider server record")
+        access_logger = logging.getLogger("uvicorn.access")
+        access_logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", target, "1.1", 200)
+        access_logger.info('%s - "%s %s HTTP/%s" %d', "spoofed@example.test", "GET", target, "1.1", 200)
+        configure_logging(configuration, cli_only=False, foreground=True)
+        access_logger.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", target, "1.1", 200)
+        contents = await AsyncPath(log_file).read_text(encoding="utf-8")
+    finally:
+        configure_safe_console_logging()
+
+    masked_uuid = "123e****************************4000"
+    assert email not in contents
+    assert account_id not in contents
+    assert (
+        f"GET /v1/accounts/{masked_uuid}?email=j***h@h***s.com&account_id={masked_uuid}&page=*** HTTP/1.1" in contents
+    )
+    assert contents.count("GET /v1/accounts/") == 3
+    assert "spoofed@example.test" not in contents
+    assert '[invalid] - "GET /v1/accounts/' in contents
+    assert "INFO" not in console_output.getvalue()
+    assert "• Provider server record" in console_output.getvalue()
+    assert "• GET /v1/accounts/" in console_output.getvalue()
+
+
+@pytest.mark.anyio
+async def test_detached_uvicorn_access_records_bypass_console_and_redact_malformed_targets(
+    tmp_path, monkeypatch, provider_logging_configuration
+) -> None:
+    """Detached access logs use persistent handlers only and fail closed for malformed targets."""
+    log_file = Path(tmp_path) / "provider.log"
+    console_output = StringIO()
+    monkeypatch.setattr(
+        logging_module,
+        "Console",
+        lambda **_kwargs: RichConsole(file=console_output, force_terminal=False, color_system=None, width=300),
+    )
+    configuration = provider_logging_configuration(log_file=log_file)
+    raw_target = "/v1/accounts?email=john.smith%40hobnobs.com&broken"
+    try:
+        configure_logging(configuration, cli_only=False, foreground=False)
+        logging.getLogger("uvicorn.access").info(
+            '%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", raw_target, "1.1", 200
+        )
+        logging.getLogger("uvicorn.access").info("unexpected access target: %s", raw_target)
+        contents = await AsyncPath(log_file).read_text(encoding="utf-8")
+    finally:
+        configure_safe_console_logging()
+
+    assert raw_target not in contents
+    assert "john.smith@hobnobs.com" not in contents
+    assert "GET <redacted-target> HTTP/1.1" in contents
+    assert "<redacted-access-record>" in contents
+    assert console_output.getvalue() == ""
 
 
 @pytest.mark.anyio

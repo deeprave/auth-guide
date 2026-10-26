@@ -9,6 +9,7 @@ import socket
 import ssl
 import sys
 from dataclasses import dataclass, field
+from importlib.metadata import version
 from pathlib import Path
 
 import anyio
@@ -125,7 +126,11 @@ async def test_foreground_runtime_serves_https_rebuilds_and_cleans_up(tmp_path, 
     port = listener.getsockname()[1]
     listener.close()
     config_file = Path(tmp_path) / "config.toml"
-    await AsyncPath(config_file).write_text(f'listen = "https://127.0.0.1:{port}"\n', encoding="utf-8")
+    log_file = Path(tmp_path) / "provider.log"
+    await AsyncPath(config_file).write_text(
+        f'listen = "https://127.0.0.1:{port}"\nlog_file = "{log_file}"\nlog_level = "INFO"\n',
+        encoding="utf-8",
+    )
     monkeypatch.setenv("AG_LISTEN", f"https://127.0.0.1:{port}")
     configuration = resolve_configuration(config_file)
 
@@ -175,10 +180,16 @@ async def test_foreground_runtime_serves_https_rebuilds_and_cleans_up(tmp_path, 
         async with LocalCertificateAuthority(tmp_path, secrets) as authority:
             trusted_context = ssl.create_default_context(cadata=await authority.get_root_certificate())
     async with httpx.AsyncClient(verify=trusted_context) as client:
-        response = await client.get(f"https://127.0.0.1:{port}/openapi.json")
+        response = await client.get(
+            f"https://127.0.0.1:{port}/v1/accounts?email={account.email}",
+            headers={"Authorization": f"Bearer {issued.raw_value}"},
+        )
     assert response.status_code == 200
 
-    await AsyncPath(config_file).write_text('listen = "https://127.0.0.1:9444"\n', encoding="utf-8")
+    await AsyncPath(config_file).write_text(
+        f'listen = "https://127.0.0.1:9444"\nlog_file = "{log_file}"\nlog_level = "INFO"\n',
+        encoding="utf-8",
+    )
     os.kill(os.getpid(), signal.SIGHUP)
     for _ in range(100):
         rebuilt = await read_state(paths)
@@ -190,9 +201,27 @@ async def test_foreground_runtime_serves_https_rebuilds_and_cleans_up(tmp_path, 
     assert rebuilt.pid == first.pid
     assert rebuilt.listen == f"https://127.0.0.1:{port}"
 
+    async with httpx.AsyncClient(verify=trusted_context) as client:
+        response = await client.get(
+            f"https://127.0.0.1:{port}/v1/accounts/{account.id}",
+            headers={"Authorization": f"Bearer {issued.raw_value}"},
+        )
+    assert response.status_code == 200
+
     os.kill(os.getpid(), shutdown_signal)
     await asyncio.wait_for(serving, timeout=5)
     assert (await read_state(paths)).state == "stopped"
+
+    contents = await AsyncPath(log_file).read_text(encoding="utf-8")
+    masked_email = "a***r@e***e.com"
+    masked_account_id = f"{str(account.id)[:4]}{'*' * 28}{str(account.id)[-4:]}"
+    assert account.email not in contents
+    assert str(account.id) not in contents
+    assert f"GET /v1/accounts?email={masked_email} HTTP/1.1" in contents
+    assert f"GET /v1/accounts/{masked_account_id} HTTP/1.1" in contents
+    assert contents.count("GET /v1/accounts") == 2
+    assert contents.count(f"Starting auth-guide {version('auth-guide')}.") == 1
+    assert contents.count(f"auth-guide {version('auth-guide')} has shut down.") == 1
 
 
 @pytest.mark.anyio

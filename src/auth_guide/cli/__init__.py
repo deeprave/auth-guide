@@ -317,7 +317,7 @@ def _server_settings(context: click.Context, listen: str | None) -> ServerSettin
 
 async def _serve_provider(settings: ServerSettings, ready_fd: int | None = None) -> None:
     """Run the reusable server runtime and report child readiness once."""
-    runtime = ProviderServerRuntime(settings)
+    runtime = ProviderServerRuntime(settings, foreground=ready_fd is None)
     readiness_sent = False
 
     def send_readiness(message: bytes) -> None:
