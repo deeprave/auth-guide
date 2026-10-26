@@ -12,7 +12,7 @@ identifiers in both query strings and path segments.
 
 **Goals:**
 
-- Give Uvicorn server, error, and access records one provider-owned logging
+- Give Uvicorn server, error, access, and TRACE ASGI records one provider-owned logging
   lifecycle.
 - Enable useful HTTP access records without retaining account identifiers or
   arbitrary query values.
@@ -33,7 +33,7 @@ identifiers in both query strings and path segments.
 ### Provider-owned Uvicorn logger bindings
 
 The runtime will disable Uvicorn's default logging configuration and bind
-`uvicorn`, `uvicorn.error`, and `uvicorn.access` to provider-managed handlers
+`uvicorn`, `uvicorn.error`, `uvicorn.access`, and `uvicorn.asgi` to provider-managed handlers
 after the provider logging configuration is established. This lets existing
 console, file, syslog, level, redaction, and handler-replacement policy apply
 to Uvicorn records.
@@ -59,6 +59,9 @@ values as follows:
 - Every other query value becomes `***` unless a future requirement explicitly
   defines it as safe to retain.
 
+Invalid email and account UUID selectors render as `[invalid]`. Email masking
+retains only the final domain label, rather than resolving a public suffix.
+
 The policy is allowlist-based for retained query values. It prevents future
 selector parameters from leaking merely because they were not added to a
 blocklist.
@@ -76,12 +79,20 @@ Detached mode will not attach a console access handler. Its Uvicorn records
 flow only to configured persistent handlers, consistent with daemon logging
 policy.
 
+TRACE-level `uvicorn.asgi` records intentionally retain their framework detail
+for development diagnostics. They are explicitly provider-managed but are not
+part of the sanitised access-record presentation.
+
 ### Reconfiguration ownership
 
 The provider logging module will remove and close all handlers it owns from the
 provider and Uvicorn logger namespaces before rebuilding them. This prevents
 default Uvicorn handlers, duplicate records, and closed shared handlers from
 surviving a SIGHUP generation change.
+
+The management-server factory establishes the access-record filter and disables
+unmanaged propagation before it constructs Uvicorn. Runtime configuration then
+attaches named console and persistent handler roles.
 
 ## Risks / Trade-offs
 
