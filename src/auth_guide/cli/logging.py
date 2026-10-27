@@ -22,6 +22,8 @@ logging.addLevelName(TRACE, "TRACE")
 _MANAGED_LOGGERS = ("auth_guide", "uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi")
 _ACCESS_EMAIL_PARAMETERS = {"email", "account_email"}
 _ACCESS_UUID_PARAMETERS = {"account_id"}
+_provider_handlers: set[logging.Handler] = set()
+_provider_filters: set[logging.Filter] = set()
 
 
 class LoggerWithTrace(logging.Logger):
@@ -79,6 +81,17 @@ class ProviderHandlers:
 
     console: logging.Handler
     persistent: tuple[logging.Handler, ...]
+
+
+@dataclass(frozen=True)
+class UvicornLoggerState:
+    """Retain the host's Uvicorn logger state while the provider owns it."""
+
+    level: int
+    propagate: bool
+
+
+_uvicorn_logger_states: dict[str, UvicornLoggerState] = {}
 
 
 class UvicornAccessFilter(logging.Filter):
@@ -215,11 +228,40 @@ def _clear_managed_handlers() -> None:
     for name in _MANAGED_LOGGERS:
         logger = logging.getLogger(name)
         for handler in logger.handlers[:]:
-            logger.removeHandler(handler)
-            handlers[id(handler)] = handler
-        logger.filters.clear()
+            if handler in _provider_handlers:
+                logger.removeHandler(handler)
+                handlers[id(handler)] = handler
+        for log_filter in logger.filters[:]:
+            if log_filter in _provider_filters:
+                logger.removeFilter(log_filter)
+    for name, state in _uvicorn_logger_states.items():
+        logger = logging.getLogger(name)
+        logger.setLevel(state.level)
+        logger.propagate = state.propagate
+    _uvicorn_logger_states.clear()
     for handler in handlers.values():
         handler.close()
+        _provider_handlers.discard(handler)
+
+
+def _uvicorn_logger(name: str) -> logging.Logger:
+    """Return a Uvicorn logger after retaining the host configuration once."""
+    logger = logging.getLogger(name)
+    if name not in _uvicorn_logger_states:
+        _uvicorn_logger_states[name] = UvicornLoggerState(level=logger.level, propagate=logger.propagate)
+    return logger
+
+
+def _add_provider_handler(logger: logging.Logger, handler: logging.Handler) -> None:
+    """Attach one provider-owned handler for cleanup during later reconfiguration."""
+    logger.addHandler(handler)
+    _provider_handlers.add(handler)
+
+
+def _add_provider_filter(logger: logging.Logger, log_filter: logging.Filter) -> None:
+    """Attach one provider-owned filter without replacing host filters."""
+    logger.addFilter(log_filter)
+    _provider_filters.add(log_filter)
 
 
 def _console_handler() -> ColouredRichHandler:
@@ -235,33 +277,33 @@ def _console_handler() -> ColouredRichHandler:
 
 def ensure_uvicorn_access_policy() -> None:
     """Prevent a factory-created server from emitting unmanaged access records."""
-    access_logger = logging.getLogger("uvicorn.access")
+    access_logger = _uvicorn_logger("uvicorn.access")
     access_logger.propagate = False
     if not any(isinstance(log_filter, UvicornAccessFilter) for log_filter in access_logger.filters):
-        access_logger.addFilter(UvicornAccessFilter())
+        _add_provider_filter(access_logger, UvicornAccessFilter())
 
 
 def _configure_uvicorn_logging(handlers: ProviderHandlers, *, foreground: bool) -> None:
     """Route Uvicorn records through the provider's managed handlers."""
     for name in ("uvicorn", "uvicorn.error", "uvicorn.asgi"):
-        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger = _uvicorn_logger(name)
         uvicorn_logger.setLevel(TRACE)
         uvicorn_logger.propagate = False
         if foreground:
-            uvicorn_logger.addHandler(handlers.console)
+            _add_provider_handler(uvicorn_logger, handlers.console)
         for handler in handlers.persistent:
-            uvicorn_logger.addHandler(handler)
+            _add_provider_handler(uvicorn_logger, handler)
 
-    access_logger = logging.getLogger("uvicorn.access")
+    access_logger = _uvicorn_logger("uvicorn.access")
     access_logger.setLevel(TRACE)
     ensure_uvicorn_access_policy()
     if foreground:
         access_console = _console_handler()
         access_console.setLevel(handlers.console.level)
         access_console.setFormatter(AccessLogFormatter())
-        access_logger.addHandler(access_console)
+        _add_provider_handler(access_logger, access_console)
     for handler in handlers.persistent:
-        access_logger.addHandler(handler)
+        _add_provider_handler(access_logger, handler)
 
 
 def configure_safe_console_logging() -> LoggerWithTrace:
@@ -274,7 +316,7 @@ def configure_safe_console_logging() -> LoggerWithTrace:
     console = _console_handler()
     console.setLevel(logging.INFO)
     console.setFormatter(_formatter("%(message)s"))
-    logger.addHandler(console)
+    _add_provider_handler(logger, console)
     return logger
 
 
@@ -301,12 +343,12 @@ def configure_logging(
         file_handler = logging.FileHandler(configuration.log_file, encoding="utf-8")
         file_handler.setLevel(persistent_level)
         file_handler.setFormatter(_formatter(configuration.file_log_format))
-        logger.addHandler(file_handler)
+        _add_provider_handler(logger, file_handler)
     if configuration.log_syslog:
         syslog_handler = logging.handlers.SysLogHandler(address=_syslog_address())
         syslog_handler.setLevel(persistent_level)
         syslog_handler.setFormatter(_formatter(configuration.file_log_format))
-        logger.addHandler(syslog_handler)
+        _add_provider_handler(logger, syslog_handler)
     if not cli_only:
         handlers = ProviderHandlers(
             console=console,

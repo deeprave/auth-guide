@@ -20,6 +20,7 @@
 - [x] 4.1 Explicitly manage `uvicorn.asgi` TRACE diagnostics, name handler roles, and establish access-record policy at management-server construction.
 - [x] 4.2 Render invalid email and account UUID selectors as `[invalid]`, support API-compatible UUID forms in query and path selectors, and cover those outcomes with behaviour tests.
 - [x] 4.3 Consolidate repeated logging-test configuration through a fixture and align the design with final-label email suffix retention.
+- [x] 4.4 Restrict on-demand publishing to main, preserve host Uvicorn logger resources during reconfiguration, and resolve lifecycle package version before async execution.
 ## Workflow follow-up
 
 - Archive the change after the project's review requirements are satisfied.

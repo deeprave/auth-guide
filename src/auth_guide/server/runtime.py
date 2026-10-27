@@ -20,6 +20,7 @@ from auth_guide.server.lifecycle import begin_runtime, end_runtime, mark_ready, 
 from auth_guide.tls import CertificateAuthorityNotInitialisedError, LocalCertificateAuthority
 
 _PACKAGE_NAME = "auth-guide"
+_PACKAGE_VERSION = version(_PACKAGE_NAME)
 
 
 class ServerRuntimeError(RuntimeError):
@@ -104,7 +105,7 @@ class ProviderServerRuntime:
                 if self._generation > 0:
                     from auth_guide.cli.logging import get_logger
 
-                    get_logger("auth_guide").info("auth-guide %s has shut down.", version(_PACKAGE_NAME))
+                    get_logger("auth_guide").info("auth-guide %s has shut down.", _PACKAGE_VERSION)
                 await end_runtime(self._paths)
 
     async def _serve_generation(self, on_ready: Callable[[], Awaitable[None]] | None) -> None:
@@ -119,7 +120,7 @@ class ProviderServerRuntime:
                 cast(CLIConfiguration, configuration), cli_only=False, foreground=self._foreground
             )
             if self._generation == 0:
-                logger.info("Starting auth-guide %s.", version(_PACKAGE_NAME))
+                logger.info("Starting auth-guide %s.", _PACKAGE_VERSION)
             async with PlatformSecretProvider("auth-guide") as secrets:
                 async with LocalCertificateAuthority(self._settings.config_dir, secrets) as authority:
                     store = AccountStore(self._settings.config_dir, secrets)

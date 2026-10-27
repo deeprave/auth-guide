@@ -369,6 +369,56 @@ async def test_reconfiguring_persistent_logging_replaces_handlers(tmp_path, prov
     assert contents.splitlines().count("after restart server operation") == 1
 
 
+@pytest.mark.anyio
+async def test_reconfiguring_logging_preserves_a_host_uvicorn_handler(tmp_path, provider_logging_configuration) -> None:
+    """Provider reconfiguration leaves a host Uvicorn handler available."""
+    stream = StringIO()
+    host_handler = logging.StreamHandler(stream)
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    original_level = uvicorn_logger.level
+    original_propagate = uvicorn_logger.propagate
+    uvicorn_logger.addHandler(host_handler)
+    uvicorn_logger.setLevel(logging.INFO)
+    try:
+        configure_logging(provider_logging_configuration(log_file=Path(tmp_path) / "provider.log"), cli_only=False)
+        configure_logging(provider_logging_configuration(), cli_only=True)
+        uvicorn_logger.info("host Uvicorn record")
+    finally:
+        uvicorn_logger.removeHandler(host_handler)
+        uvicorn_logger.setLevel(original_level)
+        uvicorn_logger.propagate = original_propagate
+        configure_safe_console_logging()
+
+    assert "host Uvicorn record" in stream.getvalue()
+
+
+@pytest.mark.anyio
+async def test_cli_reconfiguration_restores_uvicorn_logger_propagation(
+    tmp_path, provider_logging_configuration
+) -> None:
+    """A later CLI configuration returns Uvicorn records to the host logging policy."""
+    stream = StringIO()
+    root_logger = logging.getLogger()
+    root_handler = logging.StreamHandler(stream)
+    uvicorn_logger = logging.getLogger("uvicorn.error")
+    original_level = uvicorn_logger.level
+    original_propagate = uvicorn_logger.propagate
+    root_logger.addHandler(root_handler)
+    uvicorn_logger.setLevel(logging.INFO)
+    uvicorn_logger.propagate = True
+    try:
+        configure_logging(provider_logging_configuration(log_file=Path(tmp_path) / "provider.log"), cli_only=False)
+        configure_logging(provider_logging_configuration(), cli_only=True)
+        uvicorn_logger.info("propagated Uvicorn record")
+    finally:
+        root_logger.removeHandler(root_handler)
+        uvicorn_logger.setLevel(original_level)
+        uvicorn_logger.propagate = original_propagate
+        configure_safe_console_logging()
+
+    assert "propagated Uvicorn record" in stream.getvalue()
+
+
 @pytest.mark.parametrize(
     ("target", "expected"),
     [
