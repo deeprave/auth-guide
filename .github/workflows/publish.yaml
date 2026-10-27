@@ -1,20 +1,43 @@
 name: Publish
 
 on:
-  release:
-    types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
+      actions: read
+      contents: read
       id-token: write
 
     steps:
+      - name: Verify successful test workflow for publish commit
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data } = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "test.yaml",
+              head_sha: context.sha,
+              status: "completed",
+              per_page: 100,
+            });
+            const successfulRun = data.workflow_runs.find(
+              (run) => run.conclusion === "success" && run.event === "push" && run.head_branch === "main",
+            );
+            if (!successfulRun) {
+              core.setFailed(
+                `No successful test.yaml push run for main was found for publish commit ${context.sha}.`,
+              );
+            }
+
       - uses: actions/checkout@v7
 
       - name: Install uv

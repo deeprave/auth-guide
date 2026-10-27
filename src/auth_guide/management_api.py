@@ -568,13 +568,17 @@ async def create_management_server(
     install_signal_handlers: bool = True,
 ) -> Server:
     """Create an HTTPS-only Uvicorn server using the active provider leaf."""
+    from auth_guide.cli.logging import ensure_uvicorn_access_policy
+
+    ensure_uvicorn_access_policy()
     context = await authority.get_active_server_ssl_context()
     configuration = Config(
         application,
         host=host,
         port=port,
         ssl_context_factory=lambda _configuration, _default_factory: context,
-        access_log=False,
+        access_log=True,
+        log_config=None,
     )
     server_type = Server if install_signal_handlers else _LifecycleManagedServer
     return server_type(configuration)

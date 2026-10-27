@@ -1,0 +1,27 @@
+# Tasks
+
+## 1. Provider-owned Uvicorn logging
+
+- [x] 1.1 Extend the logging boundary to replace and close provider-owned Uvicorn logger bindings alongside auth-guide handlers; verify repeated configuration writes each Uvicorn server record exactly once.
+- [x] 1.2 Construct the provider HTTP server without Uvicorn's default logging configuration and with access logging enabled; verify server-operation and access records use the configured provider handlers.
+
+## 2. Sanitised HTTP access records
+
+- [x] 2.1 Add deterministic request-target sanitisation before access formatting: structurally mask email selectors, mask UUID-like path and query identifiers except for their first and last four characters, and replace unapproved query values with `***`; verify representative and malformed targets never emit raw input.
+- [x] 2.2 Add a dedicated concise Rich foreground access formatter and bind it only for foreground operation; verify detached operation sends sanitised access records exclusively to configured persistent handlers.
+
+## 3. Runtime integration and regression coverage
+
+- [x] 3.1 Exercise trusted HTTPS management requests against a disposable provider and verify emitted access records retain method, route, and query names while masking email and UUID selectors.
+- [x] 3.2 Exercise a SIGHUP server rebuild with persistent logging enabled and verify Uvicorn server/access records remain sanitised and are not duplicated.
+
+## 4. Review follow-up
+
+- [x] 4.1 Explicitly manage `uvicorn.asgi` TRACE diagnostics, name handler roles, and establish access-record policy at management-server construction.
+- [x] 4.2 Render invalid email and account UUID selectors as `[invalid]`, support API-compatible UUID forms in query and path selectors, and cover those outcomes with behaviour tests.
+- [x] 4.3 Consolidate repeated logging-test configuration through a fixture and align the design with final-label email suffix retention.
+- [x] 4.4 Restrict on-demand publishing to main, preserve host Uvicorn logger resources during reconfiguration, and resolve lifecycle package version before async execution.
+## Workflow follow-up
+
+- Archive the change after the project's review requirements are satisfied.
+
