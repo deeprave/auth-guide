@@ -8,23 +8,27 @@ database with explicit database and migration lifecycle controls.
 ## Requirements
 
 ### Requirement: Account persistence
-The store SHALL create, list, update, and permanently remove complete account
-records. An account SHALL have an immutable UUID4 identifier, unique
-syntax-valid email, validated recognised-grant set, UTC creation timestamp, and
-optional UTC expiry and full name. It SHALL preserve local-part spelling,
-lowercase the domain, enforce case-insensitive uniqueness, and reject an
-identifier over 254 octets. Expired accounts are unavailable for authentication
-and authorisation but returned by explicit administrative queries. Saves SHALL
-validate email, expiry, and grants before persistence.
+The store SHALL create, list, update, and permanently remove complete account records.
+
+#### Scenario: An account is removed
+- **WHEN** an administrator removes an account
+- **THEN** its record and grants are permanently deleted without retention
+
+### Requirement: Account identity and validation
+An account SHALL have an immutable UUID4 identifier, unique syntax-valid email, validated recognised-grant set, UTC creation timestamp, and optional UTC expiry and full name. The store SHALL preserve local-part spelling, lowercase the domain, enforce case-insensitive uniqueness, reject an identifier over 254 octets, and validate email, expiry, and grants before persistence.
+
+#### Scenario: An invalid account is saved
+- **WHEN** an account has an invalid email, expiry, or recognised-grant set
+- **THEN** the store rejects it without persistence
+
+### Requirement: Expired account availability
+Expired accounts SHALL be unavailable for authentication and authorisation but returned by explicit administrative queries.
 
 #### Scenario: An account expires
 - **WHEN** its expiry is at or before the current UTC time
 - **THEN** ordinary queries omit it and authentication fails, while an explicit
   administrative query returns it
 
-#### Scenario: An account is removed
-- **WHEN** an administrator removes an account
-- **THEN** its record and grants are permanently deleted without retention
 
 ### Requirement: Explicit database lifecycle
 The store SHALL use `auth-guide.sqlite3` under the provider configuration root.

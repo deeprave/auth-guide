@@ -34,29 +34,15 @@ that may have completed startup.
   channel rather than only reporting a generic timeout
 
 ### Requirement: Conventional PID-file lifecycle state
-The server runtime SHALL record its PID as a decimal value in
-`{configdir}/auth-guide.pid` in both background and foreground modes. It SHALL
-record the effective listener address in sibling `{configdir}/auth-guide.meta.json`
-metadata. The server runtime SHALL use a short-lived server-owned lifecycle
-lock to coordinate examination, creation, replacement, and removal of that
-pair. Before startup, while holding that lock, it SHALL reject a live existing
-PID without changing metadata, and remove stale PID and orphan metadata files
-before creating its own state. It SHALL exclusively create its PID file before
-atomically writing generation-0 metadata. During normal shutdown it SHALL
-remove metadata before the PID file, under the same lock. `stop` and `status`
-SHALL only read the files and use ordinary process liveness checks; they SHALL
-never create, remove, or repair them. Multiple named server instances are out
-of scope for this change.
+The server runtime SHALL record its PID as a decimal value in `{configdir}/auth-guide.pid` in both background and foreground modes. It SHALL record the effective listener address in sibling `{configdir}/auth-guide.meta.json` metadata.
 
 #### Scenario: Metadata records the active listener
 - **WHEN** the server runtime records its lifecycle state
 - **THEN** `{configdir}/auth-guide.meta.json` contains the effective `listen`
   address and a readiness `generation` counter
 
-#### Scenario: Lifecycle state is created or removed
-- **WHEN** the server runtime starts or shuts down
-- **THEN** it exclusively creates the PID file before atomically writing
-  metadata, and removes metadata before the PID file during shutdown
+### Requirement: Exclusive lifecycle-state mutation
+The server runtime SHALL use a short-lived server-owned lifecycle lock to coordinate examination, creation, replacement, and removal of the PID and metadata pair. Before startup, while holding that lock, it SHALL reject a live existing PID without changing metadata, and remove stale PID and orphan metadata files before creating its own state. It SHALL exclusively create its PID file before atomically writing generation-0 metadata.
 
 #### Scenario: A stale PID file is encountered
 - **WHEN** the server runtime starts and the configured PID is no longer live
@@ -73,6 +59,13 @@ of scope for this change.
   being created, replaced, or removed
 - **THEN** another start is rejected without creating a second runtime
 
+### Requirement: Lifecycle-state cleanup and inspection
+During normal shutdown the server runtime SHALL remove metadata before the PID file, under the same lock. `stop` and `status` SHALL only read the files and use ordinary process liveness checks; they SHALL never create, remove, or repair them. Multiple named server instances are out of scope for this change.
+
+#### Scenario: Lifecycle state is created or removed
+- **WHEN** the server runtime starts or shuts down
+- **THEN** it exclusively creates the PID file before atomically writing metadata, and removes metadata before the PID file during shutdown
+
 ### Requirement: Graceful background shutdown
 The `server stop` command SHALL send SIGTERM to the PID recorded in the
 server-owned lifecycle file and wait up to 30 seconds for graceful shutdown. It
@@ -85,27 +78,18 @@ report failure and retain the PID file.
   PID file
 
 ### Requirement: In-process daemon restart
-The daemon SHALL treat SIGHUP as a complete in-process rebuild of its HTTPS
-server, account-store runtime, and TLS runtime while retaining its PID. The
-`server restart` command SHALL send SIGHUP to the background daemon and wait
-for it to become ready again. Before rebuilding, the daemon SHALL re-read its
-selected TOML configuration. Original CLI arguments and inherited environment
-values SHALL retain precedence over changed TOML values.
-The `server restart` command SHALL read the current metadata generation before
-signalling SIGHUP, then wait for a higher generation and HTTPS readiness.
-If a SIGHUP arrives during initial startup, the daemon SHALL queue one rebuild
-after its initial readiness transition. If a rebuild fails after teardown, the
-daemon SHALL log the failure, perform normal lifecycle cleanup, and exit.
-`server restart` SHALL reject a runtime whose metadata generation is 0.
+The daemon SHALL treat SIGHUP as a complete in-process rebuild of its HTTPS server, account-store runtime, and TLS runtime while retaining its PID. If a SIGHUP arrives during initial startup, the daemon SHALL queue one rebuild after its initial readiness transition. If a rebuild fails after teardown, the daemon SHALL log the failure, perform normal lifecycle cleanup, and exit.
 
 #### Scenario: An operator restarts the provider
 - **WHEN** an operator invokes `auth-guide server restart`
 - **THEN** the daemon rebuilds its runtime under the same PID before the command
   reports readiness
 
+### Requirement: Restart configuration reload
+Before rebuilding, the daemon SHALL re-read its selected TOML configuration. Original CLI arguments and inherited environment values SHALL retain precedence over changed TOML values.
+
 #### Scenario: TOML configuration changes before restart
-- **WHEN** an operator changes a TOML setting not overridden by daemon CLI or
-  environment configuration, then invokes `server restart`
+- **WHEN** an operator changes a TOML setting not overridden by daemon CLI or environment configuration, then invokes `server restart`
 - **THEN** the rebuilt daemon uses the changed TOML setting
 
 #### Scenario: A rebuild fails
@@ -113,6 +97,9 @@ daemon SHALL log the failure, perform normal lifecycle cleanup, and exit.
   torn down
 - **THEN** the daemon exits after normal lifecycle cleanup and `server restart`
   reports the failed restart
+
+### Requirement: Restart readiness confirmation
+The `server restart` command SHALL send SIGHUP to the background daemon and wait for it to become ready again. It SHALL read the current metadata generation before signalling SIGHUP, then wait for a higher generation and HTTPS readiness. `server restart` SHALL reject a runtime whose metadata generation is 0.
 
 #### Scenario: A restart is requested while startup is incomplete
 - **WHEN** `server restart` finds a live runtime with metadata generation 0

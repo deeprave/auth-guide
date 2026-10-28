@@ -8,24 +8,14 @@ versioned HTTPS API rather than direct database access.
 ## Requirements
 
 ### Requirement: HTTPS-only management surface
-The provider SHALL expose account, self-service, password, token, and
-Guide-validation operations only over HTTPS at `/v1/accounts`,
-`/v1/accounts/me`, `/v1/tokens`, and `POST /v1/authenticate`.
-Every operation targeting an account other than the authenticated caller SHALL
-accept exactly one selector: immutable account UUID or validated account email.
-The provider SHALL authorise the requested operation before resolving and
-mutating another account selector. Token listing and issuance SHALL require
-`tokens:manage` before resolving any explicit UUID or email selector, including
-one that identifies the authenticated caller.
-Existing UUID-targeted paths SHALL remain supported. Email-targeted account
-read, update, and deletion SHALL use the account collection's `email` query
-parameter; password reset SHALL use the equivalent email selector convention.
-Token creation and listing SHALL accept exactly one `account_id` or
-`account_email` selector.
+The provider SHALL expose account, self-service, password, token, and Guide-validation operations only over HTTPS at `/v1/accounts`, `/v1/accounts/me`, `/v1/tokens`, and `POST /v1/authenticate`.
 
 #### Scenario: Cleartext access is attempted
 - **WHEN** management traffic is sent without HTTPS
 - **THEN** no management operation is available
+
+### Requirement: Authorised account selectors
+Every operation targeting an account other than the authenticated caller SHALL accept exactly one selector: immutable account UUID or validated account email. The provider SHALL authorise the requested operation before resolving and mutating another account selector. Token listing and issuance SHALL require `tokens:manage` before resolving any explicit UUID or email selector, including one that identifies the authenticated caller.
 
 #### Scenario: Email identifies a target account
 - **WHEN** a management request supplies a valid email selector for another
@@ -37,6 +27,9 @@ Token creation and listing SHALL accept exactly one `account_id` or
 - **WHEN** an authenticated caller supplies its own validated account email to
   the account-read endpoint
 - **THEN** the provider returns that account without requiring `accounts:read`
+
+### Requirement: Account selector routes
+Existing UUID-targeted paths SHALL remain supported. Email-targeted account read, update, and deletion SHALL use the account collection's `email` query parameter; password reset SHALL use the equivalent email selector convention. Token creation and listing SHALL accept exactly one `account_id` or `account_email` selector.
 
 #### Scenario: An existing UUID path is used
 - **WHEN** a management request supplies an account UUID in an existing account

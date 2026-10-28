@@ -2,22 +2,41 @@ name: Publish
 
 on:
   workflow_dispatch:
+    inputs:
+      draft_github_release:
+        description: Create the GitHub Release as a draft
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
-  publish:
+  verify-release:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
       actions: read
       contents: read
-      id-token: write
+    outputs:
+      commit_sha: ${{ steps.commit.outputs.sha }}
+      version: ${{ steps.version.outputs.value }}
 
     steps:
-      - name: Verify successful test workflow for publish commit
+      - uses: actions/checkout@v7
+
+      - name: Record release commit
+        id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Read package version
+        id: version
+        run: |
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Verify successful test workflow for release commit
         uses: actions/github-script@v8
         with:
           script: |
@@ -25,7 +44,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               workflow_id: "test.yaml",
-              head_sha: context.sha,
+              head_sha: "${{ steps.commit.outputs.sha }}",
               status: "completed",
               per_page: 100,
             });
@@ -34,22 +53,99 @@ jobs:
             );
             if (!successfulRun) {
               core.setFailed(
-                `No successful test.yaml push run for main was found for publish commit ${context.sha}.`,
+                `No successful test.yaml push run for release commit ${{ steps.commit.outputs.sha }} was found.`,
               );
             }
 
+      - name: Require an unreleased version
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const tag = `v${{ steps.version.outputs.value }}`;
+            try {
+              await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag,
+              });
+              core.setFailed(`GitHub Release ${tag} already exists.`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+            }
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+              });
+              core.setFailed(`Git tag ${tag} already exists.`);
+            } catch (error) {
+              if (error.status !== 404) {
+                throw error;
+              }
+            }
+
+  build-package:
+    needs: verify-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.verify-release.outputs.commit_sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Set up Python 3.13
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.13'
-
       - name: Build package
         run: uv build
 
+      - name: Upload package artefacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: package-distributions
+          path: dist/
+
+  publish-pypi:
+    needs: [verify-release, build-package]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Download package artefacts
+        uses: actions/download-artifact@v8
+        with:
+          name: package-distributions
+          path: dist/
+
       - name: Publish to PyPI
         run: uv publish --trusted-publishing always
+
+  create-release:
+    needs: [verify-release, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Create GitHub Release and tag
+        env:
+          DRAFT_GITHUB_RELEASE: ${{ inputs.draft_github_release }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.verify-release.outputs.commit_sha }}
+          VERSION: ${{ needs.verify-release.outputs.version }}
+        run: |
+          arguments=("v${VERSION}" --target "$RELEASE_SHA" --title "Release v${VERSION}" --generate-notes)
+          if [ "$DRAFT_GITHUB_RELEASE" = "true" ]; then
+            arguments+=(--draft)
+          fi
+          gh release create "${arguments[@]}"

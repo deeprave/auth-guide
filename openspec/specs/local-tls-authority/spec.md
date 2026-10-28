@@ -18,16 +18,7 @@ The provider SHALL keep its CA private key in the platform secret provider and S
 - **THEN** neither contains the CA private key
 
 ### Requirement: Local CA configuration and identity
-The provider SHALL resolve its local CA state under
-`XDG_CONFIG_HOME/mcp-guide/auth`, defaulting to `~/.config/mcp-guide/auth`,
-and SHALL accept an explicit library configuration root as an override. The
-future administration CLI SHALL expose that library argument as `--configdir`.
-It SHALL retain public certificate lifecycle metadata in a provider-owned JSON
-document there. It SHALL issue localhost and loopback server identities by
-default and SHALL accept an explicit identity list as an override; the later
-administration CLI will expose that capability as command-line arguments.
-It SHALL reject invalid, wildcard, or duplicate identities, but SHALL not
-impose a policy restriction on otherwise valid operator-selected identities.
+The provider SHALL resolve its local CA state under `XDG_CONFIG_HOME/mcp-guide/auth`, defaulting to `~/.config/mcp-guide/auth`, and SHALL accept an explicit library configuration root as an override. The future administration CLI SHALL expose that library argument as `--configdir`. It SHALL retain public certificate lifecycle metadata in a provider-owned JSON document there.
 
 #### Scenario: Default local identity is issued
 - **WHEN** an operator initialises the local CA without an identity override
@@ -38,6 +29,9 @@ impose a policy restriction on otherwise valid operator-selected identities.
 - **WHEN** a library caller supplies an explicit configuration root
 - **THEN** public certificate metadata is written beneath that supplied root
 
+### Requirement: Local CA identity selection
+The provider SHALL issue localhost and loopback server identities by default and SHALL accept an explicit identity list as an override; the later administration CLI will expose that capability as command-line arguments. It SHALL reject invalid, wildcard, or duplicate identities, but SHALL not impose a policy restriction on otherwise valid operator-selected identities.
+
 #### Scenario: Initialisation is repeated
 - **WHEN** an operator attempts CA initialisation after public CA state exists
 - **THEN** the operation fails without replacing certificates or keyring secrets
@@ -47,21 +41,14 @@ impose a policy restriction on otherwise valid operator-selected identities.
 - **THEN** the operation fails without creating or modifying certificate state
 
 ### Requirement: Modular system trust integration
-The provider SHALL perform local system trust through a modular platform
-integration protocol. It SHALL automatically select a supported platform
-implementation by default and SHALL permit an explicit implementation override
-through the future administration CLI. CA initialisation itself SHALL NOT
-require elevation; only root-trust installation or removal may do so.
-Linux trust anchors SHALL be unique to the supplied certificate so a
-replacement and its predecessor can coexist during CA rotation. macOS SHALL
-trust the root only for SSL and SHALL remove both that trust setting and the
-System Keychain item during uninstallation. Before a privileged trust mutation,
-the provider SHALL validate the configured CA material and the expected local
-trust-store state.
+The provider SHALL perform local system trust through a modular platform integration protocol. It SHALL automatically select a supported platform implementation by default and SHALL permit an explicit implementation override through the future administration CLI. CA initialisation itself SHALL NOT require elevation; only root-trust installation or removal may do so.
 
 #### Scenario: Trust installation requires elevation
 - **WHEN** an operator installs the public root into the system trust store
 - **THEN** only the platform trust operation runs with the privileges required by that platform
+
+### Requirement: Platform-specific trust lifecycle
+Linux trust anchors SHALL be unique to the supplied certificate so a replacement and its predecessor can coexist during CA rotation. macOS SHALL trust the root only for SSL and SHALL remove both that trust setting and the System Keychain item during uninstallation.
 
 #### Scenario: Routine macOS native trust is evaluated without keychain mutation
 - **WHEN** a developer runs the macOS Security-framework certificate test
@@ -72,6 +59,13 @@ trust-store state.
 #### Scenario: A replacement root is installed on Linux
 - **WHEN** emergency rotation installs a replacement before removing the old root
 - **THEN** both anchors remain distinct until the old root is explicitly removed
+
+### Requirement: Privileged trust mutation validation
+Before a privileged trust mutation, the provider SHALL validate the configured CA material and the expected local trust-store state.
+
+#### Scenario: Trust state is invalid
+- **WHEN** an operator requests a privileged trust mutation with invalid CA material or an unexpected local trust-store state
+- **THEN** the provider rejects the mutation before changing system trust
 
 #### Scenario: A privileged trust command is cancelled after launch
 - **WHEN** its caller is cancelled after the command has started
