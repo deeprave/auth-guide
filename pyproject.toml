@@ -68,7 +68,6 @@ error-on-warning = true
 dev = [
     "ruff>=0.13.2",
     "ty",
-    "pre-commit>=4.0.0",
     "watchdog>=6.0.0",
     "bandit>=1.9.2",
     "pytest>=9.1.1",
