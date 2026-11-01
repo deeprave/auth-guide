@@ -37,7 +37,7 @@ jobs:
           echo "value=$version" >> "$GITHUB_OUTPUT"
 
       - name: Verify successful test workflow for release commit
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const { data } = await github.rest.actions.listWorkflowRuns({
@@ -58,7 +58,7 @@ jobs:
             }
 
       - name: Require an unreleased version
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const tag = `v${{ steps.version.outputs.value }}`;
