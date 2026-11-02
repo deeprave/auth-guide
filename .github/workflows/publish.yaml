@@ -148,4 +148,4 @@ jobs:
           if [ "$DRAFT_GITHUB_RELEASE" = "true" ]; then
             arguments+=(--draft)
           fi
-          gh release create "${arguments[@]}"
+          gh release create "${arguments[@]}" --repo "$GITHUB_REPOSITORY"
