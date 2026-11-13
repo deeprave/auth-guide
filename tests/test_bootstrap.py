@@ -5,10 +5,10 @@ from dataclasses import dataclass, field
 import pytest
 from anyio import Path as AsyncPath
 
-from auth_guide.accounts import AccountStore
+from auth_guide.accounts import AccountStore, database_key_reference
 from auth_guide.bootstrap import initialise_provider
 from auth_guide.provider import DEFAULT_NAMESPACE
-from auth_guide.secrets import MissingSecretError, PlatformSecretProvider, SecretReference
+from auth_guide.secrets import MissingSecretError, PlatformSecretProvider
 
 
 @dataclass
@@ -97,4 +97,4 @@ async def test_local_initialisation_rolls_back_database_and_key_after_token_fail
     assert not await (AsyncPath(tmp_path) / f"{DEFAULT_NAMESPACE}.sqlite3").exists()
     async with PlatformSecretProvider("auth-guide", keyring) as secrets:
         with pytest.raises(MissingSecretError):
-            await secrets.resolve(SecretReference("auth-guide-database-key"))
+            await secrets.resolve(await database_key_reference(tmp_path, DEFAULT_NAMESPACE))

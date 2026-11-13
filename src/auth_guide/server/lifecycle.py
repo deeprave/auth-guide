@@ -209,5 +209,4 @@ async def _unlink_if_present(path: AsyncPath) -> None:
 
 def paths_for(config_dir: str | Path | AsyncPath, namespace: str = DEFAULT_NAMESPACE) -> LifecyclePaths:
     """Create lifecycle paths from the provider configuration directory."""
-    validate_namespace(namespace)
-    return LifecyclePaths(AsyncPath(config_dir), namespace)
+    return LifecyclePaths(AsyncPath(config_dir), validate_namespace(namespace))

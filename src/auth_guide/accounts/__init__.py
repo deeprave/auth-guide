@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import secrets
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ from auth_guide.accounts.tokens import (
     resolve_account_token,
     verify_account_token,
 )
+from auth_guide.config_paths import get_auth_config_dir
+from auth_guide.provider import validate_namespace
 from auth_guide.secrets import (
     MissingSecretError,
     PlatformSecretProvider,
@@ -31,11 +34,24 @@ from auth_guide.secrets import (
 
 DATABASE_KEY_REFERENCE = SecretReference("auth-guide-database-key")
 
+
+async def database_key_reference(config_dir: str | Path | AsyncPath, namespace: str) -> SecretReference:
+    """Return the database-key reference for one complete provider storage identity."""
+    resolved_root = await AsyncPath(config_dir).resolve()
+    default_root = await AsyncPath(get_auth_config_dir()).resolve()
+    if resolved_root == default_root:
+        return DATABASE_KEY_REFERENCE
+    identity = f"{validate_namespace(namespace)}\0{resolved_root}".encode("utf-8")
+    digest = hashlib.sha256(identity).hexdigest()
+    return SecretReference(f"auth-guide-database-key-{digest}")
+
+
 __all__ = [
     "AccountRecord",
     "AccountTokenRecord",
     "AccountStore",
     "AccountStoreError",
+    "database_key_reference",
     "Grant",
     "NewAccountToken",
     "generate_account_token",
@@ -125,10 +141,10 @@ class AccountStore:
             self._database_key = None
             self._passwords = PasswordOperations()
         try:
-            await self._secrets.resolve(DATABASE_KEY_REFERENCE)
+            await self._secrets.resolve(await self._database_key_reference())
         except MissingSecretError as error:
             raise AccountStoreError("Account database key does not exist") from error
-        await self._secrets.delete(DATABASE_KEY_REFERENCE)
+        await self._secrets.delete(await self._database_key_reference())
 
     async def rollback_initialisation(self) -> None:
         """Remove only database state created by this store's initialisation."""
@@ -241,12 +257,12 @@ class AccountStore:
                 if await database_path.exists():
                     await database_path.unlink()
             if created_database_key:
-                await self._secrets.delete(DATABASE_KEY_REFERENCE)
+                await self._secrets.delete(await self._database_key_reference())
 
     async def _create_database_key(self, key: bytes) -> bool:
         """Create a key to completion and report whether the caller cancelled."""
         creation = asyncio.create_task(
-            self._secrets.create(DATABASE_KEY_REFERENCE, base64.b64encode(key).decode("ascii"))
+            self._secrets.create(await self._database_key_reference(), base64.b64encode(key).decode("ascii"))
         )
         cancelled = False
         while not creation.done():
@@ -258,7 +274,7 @@ class AccountStore:
         return cancelled
 
     async def _resolve_database_key(self) -> bytes:
-        encoded_key = await self._secrets.resolve(DATABASE_KEY_REFERENCE)
+        encoded_key = await self._secrets.resolve(await self._database_key_reference())
         try:
             key = base64.b64decode(encoded_key, validate=True)
         except ValueError as error:
@@ -294,6 +310,10 @@ class AccountStore:
         """Return the database file and SQLite write-ahead-log sidecars."""
         database_path = self._database_path
         return database_path, AsyncPath(f"{database_path}-wal"), AsyncPath(f"{database_path}-shm")
+
+    async def _database_key_reference(self) -> SecretReference:
+        """Return this store's distinct platform-secret reference."""
+        return await database_key_reference(self._config_dir, self._secrets.namespace)
 
     def _tortoise_config(self) -> dict[str, Any]:
         key = self._database_key

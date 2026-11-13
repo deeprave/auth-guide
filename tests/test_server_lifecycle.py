@@ -24,12 +24,13 @@ from auth_guide.accounts import (
     AccountStore,
     AccountTokenRecord,
     Grant,
+    database_key_reference,
     generate_account_token,
 )
 from auth_guide.bootstrap import initialise_provider
 from auth_guide.cli.config import resolve_configuration
 from auth_guide.provider import DEFAULT_NAMESPACE
-from auth_guide.secrets import PlatformSecretProvider, SecretReference
+from auth_guide.secrets import PlatformSecretProvider
 from auth_guide.server import ProviderServerRuntime, ServerRuntimeError, ServerSettings
 from auth_guide.server.lifecycle import (
     LifecycleError,
@@ -274,9 +275,10 @@ async def test_runtime_does_not_create_or_migrate_an_absent_account_database(tmp
     await AsyncPath(config_file).write_text('listen = "https://127.0.0.1:9444"\n', encoding="utf-8")
     configuration = resolve_configuration(config_file)
     key = base64.b64encode(b"x" * 32).decode("ascii")
+    database_key = await database_key_reference(tmp_path, DEFAULT_NAMESPACE)
 
     async with PlatformSecretProvider("auth-guide", keyring) as secrets:
-        await secrets.create(SecretReference("auth-guide-database-key"), key)
+        await secrets.create(database_key, key)
         async with LocalCertificateAuthority(tmp_path, secrets) as authority:
             await authority.initialise()
 
@@ -286,7 +288,7 @@ async def test_runtime_does_not_create_or_migrate_an_absent_account_database(tmp
 
     assert not await (AsyncPath(tmp_path) / f"{DEFAULT_NAMESPACE}.sqlite3").exists()
     async with PlatformSecretProvider("auth-guide", keyring) as secrets:
-        assert await secrets.resolve(SecretReference("auth-guide-database-key")) == key
+        assert await secrets.resolve(database_key) == key
 
 
 @pytest.mark.anyio

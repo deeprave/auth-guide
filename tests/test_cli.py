@@ -663,6 +663,15 @@ async def test_provider_paths_reject_unsafe_environment_namespaces(namespace) ->
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(("namespace", "expected"), [("Test-Provider", "test-provider"), ("AUTH", "auth")])
+async def test_provider_paths_canonicalise_namespace_case(namespace, expected) -> None:
+    """Case variants select one canonical provider namespace."""
+    resolved = resolve_provider_paths(namespace=namespace, environ={})
+
+    assert resolved.namespace == expected
+
+
+@pytest.mark.anyio
 async def test_detached_server_child_receives_resolved_storage_selection(tmp_path) -> None:
     """A child runtime receives the parent's complete storage selection explicitly."""
     configuration = resolve_configuration(

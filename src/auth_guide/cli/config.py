@@ -64,8 +64,9 @@ def resolve_provider_paths(
 ) -> ProviderPaths:
     """Resolve provider configuration, storage, and secret namespaces together."""
     environment = os.environ if environ is None else environ
-    selected_namespace = namespace if namespace is not None else environment.get("AG_NAMESPACE", DEFAULT_NAMESPACE)
-    validate_namespace(selected_namespace)
+    selected_namespace = validate_namespace(
+        namespace if namespace is not None else environment.get("AG_NAMESPACE", DEFAULT_NAMESPACE)
+    )
     selected_file = configuration_file or _environment_path(environment, "AG_CONFIG")
     storage_root = config_dir or _environment_path(environment, "AG_CONFIGDIR")
     if storage_root is None:

@@ -36,7 +36,7 @@ async def initialise_provider(
     namespace: str = DEFAULT_NAMESPACE,
 ) -> InitialProviderCredentials:
     """Create the encrypted store and first administrator only through local CLI setup."""
-    validate_namespace(namespace)
+    namespace = validate_namespace(namespace)
     try:
         email_values = await normalise_account_email(email)
     except ValueError as error:

@@ -26,7 +26,7 @@ Operators can configure a compatible non-default backend using the standard `key
 
 ## Provider storage namespaces
 
-Use `--namespace NAME` to isolate one provider's platform-secret entries, encrypted database, certificate metadata, and server lifecycle files from another provider using the same configuration directory. `AG_NAMESPACE` supplies the environment override; an explicit `--namespace` takes precedence. A namespace must contain only ASCII letters, numbers, hyphens, and underscores. The default is `auth-guide`.
+Use `--namespace NAME` to isolate one provider's platform-secret entries, encrypted database, certificate metadata, and server lifecycle files from another provider using the same configuration directory. `AG_NAMESPACE` supplies the environment override; an explicit `--namespace` takes precedence. A namespace must contain only ASCII letters, numbers, hyphens, and underscores and is canonicalised to lowercase. The default is `auth-guide`.
 
 Use `--configdir DIRECTORY` or `AG_CONFIGDIR` to select the provider storage root. The precedence is `--configdir`, `AG_CONFIGDIR`, the parent directory of an explicit `--config` or `AG_CONFIG` file, then the platform default. An explicit configuration file remains selected when a storage-root override is present; otherwise auth-guide uses `{configdir}/{namespace}-config.toml`.
 

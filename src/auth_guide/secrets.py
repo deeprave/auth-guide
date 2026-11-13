@@ -124,8 +124,7 @@ class PlatformSecretProvider:
     """Resolve provider secrets through one private serial keyring worker."""
 
     def __init__(self, namespace: str, keyring_module: Keyring | None = None) -> None:
-        validate_namespace(namespace)
-        self._namespace = namespace
+        self._namespace = validate_namespace(namespace)
         self._keyring = keyring_module or keyring
         self._calls: queue.Queue[_KeyringCall | _Stop] = queue.Queue()
         self._worker: threading.Thread | None = None
