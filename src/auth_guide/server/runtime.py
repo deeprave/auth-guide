@@ -35,6 +35,14 @@ class RuntimeConfiguration(Protocol):
         """Return the selected configuration document."""
 
     @property
+    def storage_root(self) -> Path:
+        """Return the directory that owns persistent provider state."""
+
+    @property
+    def namespace(self) -> str:
+        """Return the provider storage and secret namespace."""
+
+    @property
     def listen(self) -> str:
         """Return the effective HTTPS listener address."""
 
@@ -54,7 +62,12 @@ class ServerSettings:
     @property
     def config_dir(self) -> Path:
         """Return the directory that owns provider and lifecycle state."""
-        return self.configuration.configuration_file.parent
+        return self.configuration.storage_root
+
+    @property
+    def namespace(self) -> str:
+        """Return the namespace that owns provider secret entries and files."""
+        return self.configuration.namespace
 
 
 class ProviderServerRuntime:
@@ -63,7 +76,7 @@ class ProviderServerRuntime:
     def __init__(self, settings: ServerSettings, *, foreground: bool = True) -> None:
         self._settings = settings
         self._foreground = foreground
-        self._paths = paths_for(settings.config_dir)
+        self._paths = paths_for(settings.config_dir, settings.namespace)
         self._generation = 0
         self._shutdown_requested = asyncio.Event()
         self._reload_requested = asyncio.Event()
@@ -121,7 +134,7 @@ class ProviderServerRuntime:
             )
             if self._generation == 0:
                 logger.info("Starting auth-guide %s.", _PACKAGE_VERSION)
-            async with PlatformSecretProvider("auth-guide") as secrets:
+            async with PlatformSecretProvider(self._settings.namespace) as secrets:
                 async with LocalCertificateAuthority(self._settings.config_dir, secrets) as authority:
                     store = AccountStore(self._settings.config_dir, secrets)
                     try:
@@ -206,6 +219,8 @@ class ProviderServerRuntime:
             log_file=self._settings.log_file_override,
             log_syslog=self._settings.log_syslog_override,
             cli_log=self._settings.cli_log_override,
+            storage_root=current.storage_root,
+            namespace=current.namespace,
         )
         self._settings = ServerSettings(
             refreshed,

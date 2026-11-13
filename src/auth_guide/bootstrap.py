@@ -17,6 +17,7 @@ from auth_guide.accounts import (
     generate_account_token,
 )
 from auth_guide.accounts.models import normalise_account_email
+from auth_guide.provider import DEFAULT_NAMESPACE, validate_namespace
 from auth_guide.secrets import PlatformSecretProvider
 
 
@@ -32,14 +33,16 @@ async def initialise_provider(
     config_dir: str | Path | AsyncPath,
     email: str,
     remove_orphan_key: bool = False,
+    namespace: str = DEFAULT_NAMESPACE,
 ) -> InitialProviderCredentials:
     """Create the encrypted store and first administrator only through local CLI setup."""
+    namespace = validate_namespace(namespace)
     try:
         email_values = await normalise_account_email(email)
     except ValueError as error:
         raise AccountStoreError(str(error)) from error
 
-    async with PlatformSecretProvider("auth-guide") as secrets_provider:
+    async with PlatformSecretProvider(namespace) as secrets_provider:
         store = AccountStore(config_dir, secrets_provider)
         initialised = False
         try:

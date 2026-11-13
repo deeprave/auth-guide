@@ -20,16 +20,17 @@ from anyio import Path as AsyncPath
 from file_keyring_backend import FileKeyring
 
 from auth_guide.accounts import (
-    DATABASE_FILENAME,
     AccountRecord,
     AccountStore,
     AccountTokenRecord,
     Grant,
+    database_key_reference,
     generate_account_token,
 )
 from auth_guide.bootstrap import initialise_provider
 from auth_guide.cli.config import resolve_configuration
-from auth_guide.secrets import PlatformSecretProvider, SecretReference
+from auth_guide.provider import DEFAULT_NAMESPACE
+from auth_guide.secrets import PlatformSecretProvider
 from auth_guide.server import ProviderServerRuntime, ServerRuntimeError, ServerSettings
 from auth_guide.server.lifecycle import (
     LifecycleError,
@@ -80,6 +81,21 @@ async def test_runtime_claims_pid_before_startup_and_removes_metadata_before_it(
     assert (await read_state(paths)).state == "stopped"
     assert not await paths.metadata.exists()
     assert not await paths.pid.exists()
+
+
+def test_lifecycle_paths_use_the_provider_namespace(tmp_path) -> None:
+    """Lifecycle state files remain isolated for each provider namespace."""
+    paths = paths_for(tmp_path, "isolated-guide")
+
+    assert paths.pid.name == "isolated-guide.pid"
+    assert paths.metadata.name == "isolated-guide.meta.json"
+    assert paths.lock.name == "isolated-guide.lifecycle.lock"
+
+
+def test_lifecycle_paths_reject_an_unsafe_namespace(tmp_path) -> None:
+    """Library callers cannot create lifecycle paths outside the storage root."""
+    with pytest.raises(ValueError, match="Provider namespace must use only ASCII"):
+        paths_for(tmp_path, "../other")
 
 
 @pytest.mark.anyio
@@ -259,9 +275,10 @@ async def test_runtime_does_not_create_or_migrate_an_absent_account_database(tmp
     await AsyncPath(config_file).write_text('listen = "https://127.0.0.1:9444"\n', encoding="utf-8")
     configuration = resolve_configuration(config_file)
     key = base64.b64encode(b"x" * 32).decode("ascii")
+    database_key = await database_key_reference(tmp_path, DEFAULT_NAMESPACE)
 
     async with PlatformSecretProvider("auth-guide", keyring) as secrets:
-        await secrets.create(SecretReference("auth-guide-database-key"), key)
+        await secrets.create(database_key, key)
         async with LocalCertificateAuthority(tmp_path, secrets) as authority:
             await authority.initialise()
 
@@ -269,9 +286,9 @@ async def test_runtime_does_not_create_or_migrate_an_absent_account_database(tmp
     with pytest.raises(ServerRuntimeError, match="migration is required"):
         await runtime.serve()
 
-    assert not await (AsyncPath(tmp_path) / DATABASE_FILENAME).exists()
+    assert not await (AsyncPath(tmp_path) / f"{DEFAULT_NAMESPACE}.sqlite3").exists()
     async with PlatformSecretProvider("auth-guide", keyring) as secrets:
-        assert await secrets.resolve(SecretReference("auth-guide-database-key")) == key
+        assert await secrets.resolve(database_key) == key
 
 
 @pytest.mark.anyio

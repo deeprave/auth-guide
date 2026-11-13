@@ -10,6 +10,7 @@ import keyring
 import pytest
 from keyring.errors import NoKeyringError
 
+import auth_guide.provider as provider_module
 from auth_guide.secrets import (
     MissingSecretError,
     PlatformSecretProvider,
@@ -247,6 +248,20 @@ def test_keyring_failure_does_not_expose_backend_diagnostics() -> None:
         assert isinstance(error.value.__cause__, RuntimeError)
 
     asyncio.run(exercise())
+
+
+def test_platform_secret_provider_rejects_an_unsafe_namespace() -> None:
+    """Library callers cannot select an unsafe platform-secret namespace."""
+    with pytest.raises(ValueError, match="Provider namespace must use only ASCII"):
+        PlatformSecretProvider("../other", MemoryKeyring())
+
+
+def test_platform_secret_provider_rejects_windows_reserved_namespace(monkeypatch) -> None:
+    """Windows device names are invalid provider namespaces only on Windows."""
+    monkeypatch.setattr(provider_module.os, "name", "nt")
+
+    with pytest.raises(ValueError, match="Windows reserved device name"):
+        PlatformSecretProvider("CON", MemoryKeyring())
 
 
 def test_documented_keyring_failure_is_preserved() -> None:

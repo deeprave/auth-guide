@@ -13,6 +13,7 @@ from pathlib import Path
 from platform import system
 
 import anyio
+import click
 import pytest
 from anyio import Path as AsyncPath
 from click.testing import CliRunner
@@ -27,6 +28,7 @@ from auth_guide.cli.config import (
     create_configuration_file,
     resolve_configuration,
     resolve_configuration_path,
+    resolve_provider_paths,
 )
 from auth_guide.cli.logging import (
     RedactingFormatter,
@@ -35,6 +37,7 @@ from auth_guide.cli.logging import (
     sanitise_access_target,
 )
 from auth_guide.management_api import create_management_application, create_management_server
+from auth_guide.provider import DEFAULT_NAMESPACE
 from auth_guide.secrets import PlatformSecretProvider
 from auth_guide.server import ServerSettings
 from auth_guide.system_trust import select_system_trust_store
@@ -76,6 +79,7 @@ def provider_logging_configuration(tmp_path):
             cli_log=True,
             console_log_format="%(message)s",
             file_log_format="%(message)s",
+            storage_root=Path(tmp_path),
         )
 
     return build
@@ -587,6 +591,119 @@ async def test_configuration_file_selection_prefers_command_line_then_environmen
 
     assert selected == command_line
     assert resolve_configuration_path(environ={"AG_CONFIG": str(environment)}) == environment
+
+
+@pytest.mark.anyio
+async def test_provider_paths_resolve_namespace_storage_root_and_configuration_file(tmp_path) -> None:
+    """Global provider options select isolated state without replacing an explicit config file."""
+    configuration_file = tmp_path / "settings" / "provider.toml"
+    storage_root = tmp_path / "state"
+
+    resolved = resolve_provider_paths(
+        configuration_file,
+        config_dir=storage_root,
+        namespace="command-line",
+        environ={"AG_CONFIGDIR": str(tmp_path / "environment"), "AG_NAMESPACE": "environment"},
+    )
+
+    assert resolved.configuration_file == configuration_file
+    assert resolved.storage_root == storage_root
+    assert resolved.namespace == "command-line"
+
+    defaults = resolve_provider_paths(environ={"AG_CONFIGDIR": str(storage_root)})
+
+    assert defaults.storage_root == storage_root
+    assert defaults.namespace == DEFAULT_NAMESPACE
+    assert defaults.configuration_file == storage_root / "auth-guide-config.toml"
+
+    environment_file = tmp_path / "environment" / "provider.toml"
+    from_environment = resolve_provider_paths(
+        environ={"AG_CONFIG": str(environment_file), "AG_NAMESPACE": "environment"}
+    )
+
+    assert from_environment.configuration_file == environment_file
+    assert from_environment.storage_root == environment_file.parent
+    assert from_environment.namespace == "environment"
+
+
+@pytest.mark.anyio
+async def test_global_namespace_and_configdir_options_select_default_configuration_file(tmp_path) -> None:
+    """Global storage options are available before every command group."""
+    storage_root = tmp_path / "isolated"
+
+    result = CliRunner().invoke(
+        cli,
+        ["--namespace", "test-provider", "--configdir", str(storage_root), "config", "path"],
+    )
+
+    assert result.exit_code == 0
+    assert result.output.strip() == str(storage_root / "test-provider-config.toml")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("namespace", ["../other", ""])
+async def test_global_namespace_option_rejects_unsafe_values(tmp_path, namespace) -> None:
+    """A command-line namespace cannot escape its selected storage directory."""
+    result = CliRunner().invoke(
+        cli,
+        ["--namespace", namespace, "--configdir", str(tmp_path), "config", "path"],
+    )
+
+    assert result.exit_code != 0
+    assert "Provider namespace must use only ASCII" in result.output
+    assert "hyphens, and underscores" in result.output
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("namespace", ["../other", "/other", "auth/guide", " ", ""])
+async def test_provider_paths_reject_unsafe_environment_namespaces(namespace) -> None:
+    """An environment namespace cannot select files outside its storage directory."""
+    with pytest.raises(ValueError, match="Provider namespace must use only ASCII"):
+        resolve_provider_paths(environ={"AG_NAMESPACE": namespace})
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("namespace", "expected"), [("Test-Provider", "test-provider"), ("AUTH", "auth")])
+async def test_provider_paths_canonicalise_namespace_case(namespace, expected) -> None:
+    """Case variants select one canonical provider namespace."""
+    resolved = resolve_provider_paths(namespace=namespace, environ={})
+
+    assert resolved.namespace == expected
+
+
+@pytest.mark.anyio
+async def test_detached_server_child_receives_resolved_storage_selection(tmp_path) -> None:
+    """A child runtime receives the parent's complete storage selection explicitly."""
+    configuration = resolve_configuration(
+        tmp_path / "provider.toml",
+        storage_root=tmp_path / "state",
+        namespace="isolated-guide",
+    )
+    context = click.Context(cli)
+    context.obj = {
+        "configuration": configuration,
+        "configuration_overrides": {
+            "log_level_console": None,
+            "log_level": None,
+            "log_file": None,
+            "log_syslog": None,
+            "cli_log": None,
+        },
+    }
+
+    arguments = cli_module._server_child_arguments(context, None, 42)
+
+    assert arguments[:9] == [
+        sys.executable,
+        "-m",
+        "auth_guide",
+        "--config",
+        str(tmp_path / "provider.toml"),
+        "--configdir",
+        str(tmp_path / "state"),
+        "--namespace",
+        "isolated-guide",
+    ]
 
 
 @pytest.mark.anyio

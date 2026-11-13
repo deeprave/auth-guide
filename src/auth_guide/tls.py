@@ -155,7 +155,7 @@ class LocalCertificateAuthority:
 
     @property
     def _metadata_path(self) -> AsyncPath:
-        return self._config_dir / "certificates.json"
+        return self._config_dir / f"{self._secrets.namespace}-certificates.json"
 
     async def rotate_server_certificate(self, identities: tuple[str, ...]) -> CertificateMetadata:
         """Replace the active server certificate while retaining its lifecycle record."""

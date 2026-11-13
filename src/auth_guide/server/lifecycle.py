@@ -12,6 +12,8 @@ from typing import Literal
 import anyio
 from anyio import Path as AsyncPath
 
+from auth_guide.provider import DEFAULT_NAMESPACE, validate_namespace
+
 
 class LifecycleError(RuntimeError):
     """Raised when the local provider lifecycle state is not usable."""
@@ -22,21 +24,22 @@ class LifecyclePaths:
     """The server-owned files for one configured provider instance."""
 
     config_dir: AsyncPath
+    namespace: str = DEFAULT_NAMESPACE
 
     @property
     def pid(self) -> AsyncPath:
         """Return the conventional decimal PID-file location."""
-        return self.config_dir / "auth-guide.pid"
+        return self.config_dir / f"{self.namespace}.pid"
 
     @property
     def metadata(self) -> AsyncPath:
         """Return the additive JSON lifecycle metadata location."""
-        return self.config_dir / "auth-guide.meta.json"
+        return self.config_dir / f"{self.namespace}.meta.json"
 
     @property
     def lock(self) -> AsyncPath:
         """Return the private advisory-lock location."""
-        return self.config_dir / "auth-guide.lifecycle.lock"
+        return self.config_dir / f"{self.namespace}.lifecycle.lock"
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +207,6 @@ async def _unlink_if_present(path: AsyncPath) -> None:
         return
 
 
-def paths_for(config_dir: str | Path | AsyncPath) -> LifecyclePaths:
+def paths_for(config_dir: str | Path | AsyncPath, namespace: str = DEFAULT_NAMESPACE) -> LifecyclePaths:
     """Create lifecycle paths from the provider configuration directory."""
-    return LifecyclePaths(AsyncPath(config_dir))
+    return LifecyclePaths(AsyncPath(config_dir), validate_namespace(namespace))
