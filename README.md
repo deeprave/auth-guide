@@ -24,6 +24,14 @@ Provider-owned secret values are held outside configuration and database files. 
 
 Operators can configure a compatible non-default backend using the standard `keyring` configuration mechanism. That choice is part of the host's security boundary; auth-guide neither substitutes a fallback nor attempts to classify the configured backend's storage security.
 
+## Provider storage namespaces
+
+Use `--namespace NAME` to isolate one provider's platform-secret entries, encrypted database, certificate metadata, and server lifecycle files from another provider using the same configuration directory. `AG_NAMESPACE` supplies the environment override; an explicit `--namespace` takes precedence. A namespace must contain only ASCII letters, numbers, hyphens, and underscores. The default is `auth-guide`.
+
+Use `--configdir DIRECTORY` or `AG_CONFIGDIR` to select the provider storage root. The precedence is `--configdir`, `AG_CONFIGDIR`, the parent directory of an explicit `--config` or `AG_CONFIG` file, then the platform default. An explicit configuration file remains selected when a storage-root override is present; otherwise auth-guide uses `{configdir}/{namespace}-config.toml`.
+
+Within the selected storage root, each namespace uses `{namespace}.lifecycle.lock`, `{namespace}.sqlite3`, `{namespace}.pid`, `{namespace}.meta.json`, `{namespace}-certificates.json`, and `{namespace}-config.toml`. This is a breaking filename change: manually rename existing `auth-guide.lifecycle.lock`, `auth-guide.sqlite3`, `auth-guide.pid`, `auth-guide.meta.json`, `certificates.json`, and `config.toml` before upgrading. Legacy filenames are not read.
+
 ## Running the local provider
 
 The local HTTPS provider is operated with `auth-guide server`. First create any optional configuration scaffold, initialise the local certificate authority, and create the first administrator. `init` displays the initial password and bearer token once, so run it from a terminal and store those credentials safely.

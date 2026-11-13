@@ -13,6 +13,8 @@ from typing import Protocol, TypeVar, cast
 import keyring
 from keyring.errors import KeyringError
 
+from auth_guide.provider import validate_namespace
+
 __all__ = [
     "MissingSecretError",
     "PlatformSecretProvider",
@@ -122,15 +124,18 @@ class PlatformSecretProvider:
     """Resolve provider secrets through one private serial keyring worker."""
 
     def __init__(self, namespace: str, keyring_module: Keyring | None = None) -> None:
-        if not namespace.strip():
-            msg = "Secret namespace must not be blank"
-            raise ValueError(msg)
+        validate_namespace(namespace)
         self._namespace = namespace
         self._keyring = keyring_module or keyring
         self._calls: queue.Queue[_KeyringCall | _Stop] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._closed = False
         self._shutdown_completion: asyncio.Future[None] | None = None
+
+    @property
+    def namespace(self) -> str:
+        """Return the provider namespace used for platform secret entries."""
+        return self._namespace
 
     @property
     def is_running(self) -> bool:

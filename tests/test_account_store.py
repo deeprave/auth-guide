@@ -9,7 +9,6 @@ import pytest
 from anyio import Path
 
 from auth_guide.accounts import (
-    DATABASE_FILENAME,
     AccountRecord,
     AccountStore,
     AccountStoreError,
@@ -139,7 +138,7 @@ async def test_generated_account_token_is_opaque_and_verifies_only_its_own_value
 @pytest.mark.anyio
 async def test_existing_database_without_its_key_fails_without_replacement(tmp_path) -> None:
     """A missing platform key does not silently strand an existing database."""
-    database_path = Path(tmp_path) / DATABASE_FILENAME
+    database_path = Path(tmp_path) / "account-store.sqlite3"
     await database_path.write_bytes(b"existing encrypted database")
     async with PlatformSecretProvider("account-store", MemoryKeyring()) as secrets:
         store = AccountStore(Path(tmp_path), secrets)
@@ -151,7 +150,7 @@ async def test_existing_database_without_its_key_fails_without_replacement(tmp_p
 @pytest.mark.anyio
 async def test_readiness_does_not_create_a_missing_database(tmp_path) -> None:
     """Readiness leaves first-time database creation to explicit migration."""
-    database_path = Path(tmp_path) / DATABASE_FILENAME
+    database_path = Path(tmp_path) / "account-store.sqlite3"
     async with PlatformSecretProvider("account-store", MemoryKeyring()) as secrets:
         await secrets.store(SecretReference("auth-guide-database-key"), b64encode(b"0" * 32).decode("ascii"))
         async with AccountStore(Path(tmp_path), secrets) as store:
@@ -163,7 +162,7 @@ async def test_readiness_does_not_create_a_missing_database(tmp_path) -> None:
 @pytest.mark.anyio
 async def test_initialise_refuses_to_replace_an_existing_database(tmp_path) -> None:
     """Database creation is an explicit one-time initialisation operation."""
-    database_path = Path(tmp_path) / DATABASE_FILENAME
+    database_path = Path(tmp_path) / "account-store.sqlite3"
     await database_path.write_bytes(b"existing encrypted database")
     async with PlatformSecretProvider("account-store", MemoryKeyring()) as secrets:
         store = AccountStore(Path(tmp_path), secrets)

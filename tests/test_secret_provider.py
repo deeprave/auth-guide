@@ -249,6 +249,12 @@ def test_keyring_failure_does_not_expose_backend_diagnostics() -> None:
     asyncio.run(exercise())
 
 
+def test_platform_secret_provider_rejects_an_unsafe_namespace() -> None:
+    """Library callers cannot select an unsafe platform-secret namespace."""
+    with pytest.raises(ValueError, match="Provider namespace must use only ASCII"):
+        PlatformSecretProvider("../other", MemoryKeyring())
+
+
 def test_documented_keyring_failure_is_preserved() -> None:
     async def exercise() -> None:
         async with PlatformSecretProvider("auth-guide", UnavailableKeyring()) as provider:

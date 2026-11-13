@@ -136,6 +136,17 @@ async def test_initialise_creates_a_localhost_certificate_once(tmp_path: Path) -
 
 
 @pytest.mark.anyio
+async def test_initialise_scopes_certificate_metadata_to_its_namespace(tmp_path: Path) -> None:
+    """Certificate metadata is not shared with the default provider namespace."""
+    async with PlatformSecretProvider("isolated-guide", MemoryKeyring()) as secrets:
+        async with LocalCertificateAuthority(tmp_path, secrets) as authority:
+            await authority.initialise()
+
+    assert await (AsyncPath(tmp_path) / "isolated-guide-certificates.json").exists()
+    assert not await (AsyncPath(tmp_path) / "certificates.json").exists()
+
+
+@pytest.mark.anyio
 async def test_concurrent_authorities_share_one_initialisation_outcome(tmp_path: Path) -> None:
     keyring = MemoryKeyring()
     async with PlatformSecretProvider("auth-guide-concurrent-initialise", keyring) as secrets:
@@ -224,7 +235,7 @@ async def test_valid_internationalised_identity_is_issued_in_certificate_form(tm
 
 @pytest.mark.anyio
 async def test_malformed_persisted_metadata_is_reported_as_a_validation_error(tmp_path: Path) -> None:
-    metadata_path = AsyncPath(tmp_path) / "certificates.json"
+    metadata_path = AsyncPath(tmp_path) / "auth-guide-malformed-metadata-certificates.json"
     await metadata_path.write_text("not-json", encoding="utf-8")
     async with PlatformSecretProvider("auth-guide-malformed-metadata", MemoryKeyring()) as secrets:
         async with LocalCertificateAuthority(tmp_path, secrets) as authority:
@@ -236,7 +247,7 @@ async def test_malformed_persisted_metadata_is_reported_as_a_validation_error(tm
 async def test_ca_rotation_rejects_malformed_pending_removal_metadata(tmp_path: Path) -> None:
     """A corrupt pending-removal record cannot be overwritten by a new authority."""
     trust_store = RecordingTrustStore()
-    metadata_path = AsyncPath(tmp_path) / "certificates.json"
+    metadata_path = AsyncPath(tmp_path) / "auth-guide-malformed-pending-removal-certificates.json"
     async with PlatformSecretProvider("auth-guide-malformed-pending-removal", MemoryKeyring()) as secrets:
         async with LocalCertificateAuthority(tmp_path, secrets) as authority:
             await authority.initialise()

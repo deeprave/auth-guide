@@ -9,6 +9,7 @@ from pathlib import Path
 from anyio import Path as AsyncPath
 
 from auth_guide.config_paths import get_auth_config_dir
+from auth_guide.provider import DEFAULT_NAMESPACE, validate_namespace
 
 DEFAULT_ADDRESS = "https://localhost:8443"
 DEFAULT_CONSOLE_LOG_FORMAT = "%(message)s"
@@ -41,6 +42,39 @@ class CLIConfiguration:
     cli_log: bool
     console_log_format: str
     file_log_format: str
+    storage_root: Path
+    namespace: str = DEFAULT_NAMESPACE
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderPaths:
+    """Resolved persistent provider locations for one CLI invocation."""
+
+    configuration_file: Path
+    storage_root: Path
+    namespace: str
+
+
+def resolve_provider_paths(
+    configuration_file: Path | None = None,
+    *,
+    config_dir: Path | None = None,
+    namespace: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> ProviderPaths:
+    """Resolve provider configuration, storage, and secret namespaces together."""
+    environment = os.environ if environ is None else environ
+    selected_namespace = namespace if namespace is not None else environment.get("AG_NAMESPACE", DEFAULT_NAMESPACE)
+    validate_namespace(selected_namespace)
+    selected_file = configuration_file or _environment_path(environment, "AG_CONFIG")
+    storage_root = config_dir or _environment_path(environment, "AG_CONFIGDIR")
+    if storage_root is None:
+        storage_root = selected_file.parent if selected_file is not None else get_auth_config_dir()
+    return ProviderPaths(
+        configuration_file=selected_file or storage_root / f"{selected_namespace}-config.toml",
+        storage_root=storage_root,
+        namespace=selected_namespace,
+    )
 
 
 def resolve_configuration_path(
@@ -49,8 +83,12 @@ def resolve_configuration_path(
     environ: Mapping[str, str] | None = None,
 ) -> Path:
     """Resolve the explicit configuration file before loading any settings."""
-    environment = os.environ if environ is None else environ
-    return configuration_file or Path(environment.get("AG_CONFIG") or get_auth_config_dir() / "config.toml")
+    return resolve_provider_paths(configuration_file, environ=environ).configuration_file
+
+
+def _environment_path(environment: Mapping[str, str], name: str) -> Path | None:
+    """Return a configured path only when the environment value is non-empty."""
+    return Path(value) if (value := environment.get(name)) else None
 
 
 def resolve_configuration(
@@ -63,6 +101,8 @@ def resolve_configuration(
     log_file: str | None = None,
     log_syslog: bool | None = None,
     cli_log: bool | None = None,
+    storage_root: Path | None = None,
+    namespace: str = DEFAULT_NAMESPACE,
     environ: Mapping[str, str] | None = None,
 ) -> CLIConfiguration:
     """Resolve settings from arguments, environment, TOML, then defaults."""
@@ -84,6 +124,8 @@ def resolve_configuration(
         cli_log=_resolve_boolean(cli_log, environment.get("AG_CLILOG"), values.get("log_cli"), True),
         console_log_format=_resolve_string(None, None, values.get("console_log_format"), DEFAULT_CONSOLE_LOG_FORMAT),
         file_log_format=_resolve_string(None, None, values.get("file_log_format"), DEFAULT_FILE_LOG_FORMAT),
+        storage_root=storage_root or configuration_file.parent,
+        namespace=namespace,
     )
 
 

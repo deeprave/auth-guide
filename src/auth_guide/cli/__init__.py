@@ -26,8 +26,9 @@ from auth_guide.cli.client import (
     ManagementAPIError,
     ManagementClientConfiguration,
 )
-from auth_guide.cli.config import create_configuration_file, resolve_configuration, resolve_configuration_path
+from auth_guide.cli.config import create_configuration_file, resolve_configuration, resolve_provider_paths
 from auth_guide.cli.logging import configure_logging, configure_safe_console_logging, get_logger
+from auth_guide.provider import DEFAULT_NAMESPACE
 from auth_guide.secrets import PlatformSecretProvider, SecretProviderError
 from auth_guide.server import ProviderServerRuntime, ServerRuntimeError, ServerSettings
 from auth_guide.server.lifecycle import LifecycleError, paths_for, process_is_live, read_state
@@ -85,6 +86,8 @@ class ConfigurationGroup(click.Group):
 
 @click.group(cls=AdministrationGroup)
 @click.option("--config", "configuration_file", "-C", type=click.Path(path_type=Path), help="Configuration TOML file.")
+@click.option("--configdir", "config_dir", type=click.Path(path_type=Path), help="Provider storage directory.")
+@click.option("--namespace", help="Provider storage namespace.")
 @click.option("--address", "address", "-A", help="Provider HTTPS address.")
 @click.option("--token", "prompt_token", is_flag=True, help="Prompt for the operator bearer token.")
 @click.option(
@@ -105,6 +108,8 @@ class ConfigurationGroup(click.Group):
 def cli(
     context: click.Context,
     configuration_file: Path | None,
+    config_dir: Path | None,
+    namespace: str | None,
     address: str | None,
     prompt_token: bool,
     log_level_console: str | None,
@@ -119,8 +124,9 @@ def cli(
     context.ensure_object(dict)
     safe_logger = configure_safe_console_logging()
     try:
+        paths = resolve_provider_paths(configuration_file, config_dir=config_dir, namespace=namespace)
         configuration = resolve_configuration(
-            resolve_configuration_path(configuration_file),
+            paths.configuration_file,
             listen=None,
             address=address,
             log_level_console=log_level_console,
@@ -128,6 +134,8 @@ def cli(
             log_file=None if log_file is None else str(log_file),
             log_syslog=log_syslog,
             cli_log=cli_log,
+            storage_root=paths.storage_root,
+            namespace=paths.namespace,
         )
     except (OSError, ValueError) as error:
         safe_logger.error("Error: Unable to load configuration: %s", error)
@@ -281,9 +289,10 @@ def initialise_provider(context: click.Context, email: str, remove_orphan_key: b
     try:
         result = anyio.run(
             _initialise_local_provider,
-            context.obj["configuration"].configuration_file.parent,
+            context.obj["configuration"].storage_root,
             email,
             remove_orphan_key,
+            context.obj["configuration"].namespace,
         )
     except (AccountStoreError, OSError, SecretProviderError, ValueError) as error:
         _operational_failure(str(error))
@@ -292,10 +301,10 @@ def initialise_provider(context: click.Context, email: str, remove_orphan_key: b
 
 
 async def _initialise_local_provider(
-    config_dir: Path, email: str, remove_orphan_key: bool
+    config_dir: Path, email: str, remove_orphan_key: bool, namespace: str = DEFAULT_NAMESPACE
 ) -> InitialProviderCredentials:
     """Bridge Click's synchronous callback into one local bootstrap operation."""
-    return await initialise_local_provider(config_dir, email, remove_orphan_key=remove_orphan_key)
+    return await initialise_local_provider(config_dir, email, remove_orphan_key=remove_orphan_key, namespace=namespace)
 
 
 def _server_settings(context: click.Context, listen: str | None) -> ServerSettings:
@@ -303,7 +312,13 @@ def _server_settings(context: click.Context, listen: str | None) -> ServerSettin
     configuration = context.obj["configuration"]
     overrides = context.obj["configuration_overrides"]
     if listen is not None:
-        configuration = resolve_configuration(configuration.configuration_file, listen=listen, **overrides)
+        configuration = resolve_configuration(
+            configuration.configuration_file,
+            listen=listen,
+            storage_root=configuration.storage_root,
+            namespace=configuration.namespace,
+            **overrides,
+        )
     return ServerSettings(
         configuration=configuration,
         listen_override=listen,
@@ -351,7 +366,17 @@ async def _serve_provider(settings: ServerSettings, ready_fd: int | None = None)
 def _server_child_arguments(context: click.Context, listen: str | None, ready_fd: int) -> list[str]:
     """Build the detached self-exec invocation without forwarding credentials."""
     configuration = context.obj["configuration"]
-    arguments = [sys.executable, "-m", "auth_guide", "--config", str(configuration.configuration_file)]
+    arguments = [
+        sys.executable,
+        "-m",
+        "auth_guide",
+        "--config",
+        str(configuration.configuration_file),
+        "--configdir",
+        str(configuration.storage_root),
+        "--namespace",
+        configuration.namespace,
+    ]
     overrides = context.obj["configuration_overrides"]
     for option, value in (
         ("--log-console", overrides["log_level_console"]),
@@ -444,7 +469,8 @@ def start_server(context: click.Context, listen: str | None) -> None:
 def server_status(context: click.Context) -> None:
     """Write structured local server lifecycle status."""
     try:
-        state = anyio.run(read_state, paths_for(context.obj["configuration"].configuration_file.parent))
+        configuration = context.obj["configuration"]
+        state = anyio.run(read_state, paths_for(configuration.storage_root, configuration.namespace))
     except (LifecycleError, OSError, ValueError) as error:
         _operational_failure(str(error))
     click.echo(state.as_json())
@@ -454,7 +480,8 @@ def server_status(context: click.Context) -> None:
 
 def _signal_running_server(context: click.Context, signal_number: signal.Signals) -> int:
     """Read and signal a live runtime without modifying lifecycle state."""
-    state = anyio.run(read_state, paths_for(context.obj["configuration"].configuration_file.parent))
+    configuration = context.obj["configuration"]
+    state = anyio.run(read_state, paths_for(configuration.storage_root, configuration.namespace))
     if state.state == "stopped":
         _operational_failure("auth-guide server is not running")
     if state.state == "stale" or state.pid is None or not process_is_live(state.pid):
@@ -484,7 +511,8 @@ def stop_server(context: click.Context) -> None:
 def restart_server(context: click.Context) -> None:
     """Request an in-process rebuild of the running local provider."""
     try:
-        lifecycle_paths = paths_for(context.obj["configuration"].configuration_file.parent)
+        configuration = context.obj["configuration"]
+        lifecycle_paths = paths_for(configuration.storage_root, configuration.namespace)
         state = anyio.run(read_state, lifecycle_paths)
         if state.state == "starting" or state.generation == 0:
             _operational_failure("auth-guide server is still starting")
@@ -517,16 +545,16 @@ def run_server_child(context: click.Context, listen: str | None, ready_fd: int) 
         raise click.exceptions.Exit(1) from None
 
 
-async def _initialise_certificate_authority(config_dir: Path) -> None:
+async def _initialise_certificate_authority(config_dir: Path, namespace: str) -> None:
     """Create the provider-local authority through its owned secret boundary."""
-    async with PlatformSecretProvider("auth-guide") as secrets:
+    async with PlatformSecretProvider(namespace) as secrets:
         async with LocalCertificateAuthority(config_dir, secrets) as authority:
             await authority.initialise()
 
 
-async def _change_system_trust(config_dir: Path, remove: bool) -> None:
+async def _change_system_trust(config_dir: Path, namespace: str, remove: bool) -> None:
     """Install or remove the current public CA through the selected platform facade."""
-    async with PlatformSecretProvider("auth-guide") as secrets:
+    async with PlatformSecretProvider(namespace) as secrets:
         async with LocalCertificateAuthority(config_dir, secrets) as authority:
             trust_store = await select_system_trust_store()
             if remove:
@@ -545,7 +573,11 @@ def certificate_authority() -> None:
 def initialise_certificate_authority(context: click.Context) -> None:
     """Create the local CA and its default localhost certificate."""
     try:
-        anyio.run(_initialise_certificate_authority, context.obj["configuration"].configuration_file.parent)
+        anyio.run(
+            _initialise_certificate_authority,
+            context.obj["configuration"].storage_root,
+            context.obj["configuration"].namespace,
+        )
     except (
         CertificateAuthorityAlreadyInitialisedError,
         OSError,
@@ -567,7 +599,12 @@ def certificate_trust() -> None:
 def install_certificate_trust(context: click.Context) -> None:
     """Install the current local CA in the supported system trust store."""
     try:
-        anyio.run(_change_system_trust, context.obj["configuration"].configuration_file.parent, False)
+        anyio.run(
+            _change_system_trust,
+            context.obj["configuration"].storage_root,
+            context.obj["configuration"].namespace,
+            False,
+        )
     except (
         CertificateAuthorityNotInitialisedError,
         OSError,
@@ -585,7 +622,12 @@ def install_certificate_trust(context: click.Context) -> None:
 def remove_certificate_trust(context: click.Context) -> None:
     """Remove the current local CA from the supported system trust store."""
     try:
-        anyio.run(_change_system_trust, context.obj["configuration"].configuration_file.parent, True)
+        anyio.run(
+            _change_system_trust,
+            context.obj["configuration"].storage_root,
+            context.obj["configuration"].namespace,
+            True,
+        )
     except (
         CertificateAuthorityNotInitialisedError,
         OSError,

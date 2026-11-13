@@ -30,14 +30,12 @@ from auth_guide.secrets import (
 )
 
 DATABASE_KEY_REFERENCE = SecretReference("auth-guide-database-key")
-DATABASE_FILENAME = "auth-guide.sqlite3"
 
 __all__ = [
     "AccountRecord",
     "AccountTokenRecord",
     "AccountStore",
     "AccountStoreError",
-    "DATABASE_FILENAME",
     "Grant",
     "NewAccountToken",
     "generate_account_token",
@@ -289,7 +287,7 @@ class AccountStore:
     @property
     def _database_path(self) -> AsyncPath:
         """Return the configured encrypted database path."""
-        return self._config_dir / DATABASE_FILENAME
+        return self._config_dir / f"{self._secrets.namespace}.sqlite3"
 
     @property
     def _database_files(self) -> tuple[AsyncPath, AsyncPath, AsyncPath]:
